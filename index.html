@@ -965,7 +965,8 @@ var HC = (function () {
     if (ta.length >= 8 && ta !== digits(nw.acct) && digits(text).indexOf(ta) >= 0) out.push('이전 사람 계좌번호');
     var tadr = normAddr(tmpl.worker.addr);
     var tpre = tadr.slice(0, 10), nadr = normAddr(nw.addr);
-    if (tadr.length >= 6 && tadr !== nadr && (normAddr(text).indexOf(tadr) >= 0 || (tpre.length >= 8 && nadr.indexOf(tpre) < 0 && normAddr(text).indexOf(tpre) >= 0))) out.push('이전 사람 주소');
+    var ntxt = normAddr(text); if (nadr.length >= 6) ntxt = ntxt.split(nadr).join('');   // 새 주소가 옛 주소를 포함하는 경우(옛 주소 + 호수 추가)는 남은 것으로 보지 않음
+    if (tadr.length >= 6 && tadr !== nadr && (ntxt.indexOf(tadr) >= 0 || (tpre.length >= 8 && nadr.indexOf(tpre) < 0 && ntxt.indexOf(tpre) >= 0))) out.push('이전 사람 주소');
     var tb = birthKey(tmpl.worker.birth);
     if (tb && tb !== birthKey(nw.birth)) { var bm = /(\d{4})\D+(\d{1,2})\D+(\d{1,2})/.exec(tmpl.worker.birth || ''); if (bm && b.worker && birthKey(b.worker.birth) === tb) out.push('이전 사람 생년월일'); }
     return out;
@@ -1012,6 +1013,22 @@ var HC = (function () {
       if (c > bc || (c === bc && c > 0 && best && n.length > best.length)) { best = n; bc = c; }
     });
     return best;
+  }
+  // 주소를 n개 문단에 나눠 담기: 쉼표 뒤 > 마지막 공백 > 글자 수 절반 순서로 자른다 (각 조각은 비어 있지 않음)
+  function splitAddr(addr, n) {
+    var a = String(addr).trim();
+    if (n <= 1) return [a];
+    var parts = [], rest = a;
+    for (var i = 0; i < n - 1; i++) {
+      var left = n - 1 - i, cut = -1, c;
+      c = rest.lastIndexOf(', '); if (c > 0 && c + 2 < rest.length) cut = c + 1;
+      if (cut < 0) { c = rest.lastIndexOf(' '); if (c > 0 && c + 1 < rest.length) cut = c; }
+      if (cut < 0) cut = Math.max(1, Math.floor(rest.length / 2));
+      if (rest.length - cut < left) cut = Math.max(1, rest.length - left);
+      parts.push(rest.slice(0, cut).trim() || rest.slice(0, cut)); rest = rest.slice(cut).trim() || rest.slice(cut);
+    }
+    parts.push(rest);
+    return parts;
   }
   function isCompanyAddr(s) { var n = nS(s); return COMPANY_ADDR.some(function (k) { return n.indexOf(k) >= 0; }); }
   function isContinuation(s) {
@@ -1110,9 +1127,14 @@ var HC = (function () {
     if (o.addrBlocks && o.addrBlocks.length && n.addr) {
       o.addrBlocks.forEach(function (b) {
         if (ps[b.idx] === undefined) return;
-        jobs[b.idx] = b.prefix + n.addr;
-        for (var k = 1; k < b.span; k++) jobs[b.idx + k] = '';
         found.addr++;
+        // 이미 같은 내용이면 건드리지 않는다
+        var cat = ''; for (var q = 0; q < b.span; q++) cat += (ps[b.idx + q] || '');
+        if (nS(cat) === nS(b.prefix + n.addr)) return;
+        // 문단 수는 그대로 두고(빈 문단을 만들면 한글이 파일을 열지 못함) 새 주소를 나눠 넣는다
+        var parts = splitAddr(n.addr, b.span);
+        jobs[b.idx] = b.prefix + parts[0];
+        for (var k = 1; k < b.span; k++) jobs[b.idx + k] = ((ps[b.idx + k] || '').match(/^\s*/)[0] || ' ') + parts[k];
       });
     }
     // 은행·계좌
@@ -1331,6 +1353,7 @@ var S = {
   npicked: {}, nedit: {}, np: { mode: 'hire', months: 3, start: '', end: '' }, tplMode: 'auto', tplRel: '',
   made: [], sel: 0, acks: {}, busy: '', note: '', sheetUrl: '', dir: null, files: null, sampleFor: {}, fc: '', fk: '', nfc: '', nfk: '', sampleSel: '', sampleQ: '', tplQ: '', ctx: null
 };
+var VERSION = '2026-10-12 c (CRC·이름매칭)';
 var rrnCol = '';
 
 // ---------- 저장된 값(이 컴퓨터의 브라우저에만 저장)
@@ -1474,7 +1497,7 @@ function ownerFromFile(c) {
 }
 function buildCtx() {
   var names = [], seen = {};
-  S.sheet.rows.forEach(function (r) { var n = nn(r.v['성명']); if (n.length >= 2 && !seen[n]) { seen[n] = 1; names.push(n); } });
+  S.sheet.rows.forEach(function (r) { [nn(r.v['성명']), baseName(r.v['성명'])].forEach(function (n) { if (n.length >= 2 && !seen[n]) { seen[n] = 1; names.push(n); } }); });
   var nf = {}, pf = {}, cnt = 0;
   S.contracts.forEach(function (c) {
     if (!c.paras) return; cnt++;
@@ -1501,22 +1524,46 @@ function sampleList(q) {
   var k = nn(q);
   return S.contracts.filter(function (c) { return c.paras && (!k || nn(sampleLabel(c)).indexOf(k) >= 0); }).sort(function (a, b) { return a.rel < b.rel ? -1 : 1; }).slice(0, 400);
 }
-// 그 사람 이름이 들어 있는 기존 계약서(기본 샘플): 시트의 현재 기간과 같은 것 > 가장 늦게 끝나는 것
-function ownContract(row) {
-  var key = nn(row.v['성명']), pm = periodOf(row), best = null, bs = -1;
-  S.contracts.forEach(function (c) {
-    if (!c.paras || c.owner !== key) return;
-    var sc = (pm && c.per && c.per.start === pm[0] && c.per.end === pm[1]) ? 2 : 1;
-    if (sc > bs || (sc === bs && best && c.per && best.per && c.per.end > best.per.end)) { best = c; bs = sc; }
-  });
-  return best;
+// 시트 이름에서 (재), (재2), 끝 숫자를 뗀 실제 이름: "고대복(재2)" -> "고대복", "김지혜3" -> "김지혜"
+function baseName(n) { return nn(n).replace(/[(（][^)）]*[)）]/g, '').replace(/[0-9]+$/, ''); }
+function textKey(c) { if (c._tk === undefined) c._tk = nn((c.paras || []).join('')); return c._tk; }
+function digitsLine(c) { if (c._dg === undefined) c._dg = (c.paras || []).map(function (p) { return p.replace(/\D/g, ''); }).join('|'); return c._dg; }
+// 계약서 안에 이 사람의 주민번호·연락처·계좌번호가 있는지 (많이 맞을수록 높은 점수)
+function idScore(c, row) {
+  var t = digitsLine(c), sc = 0;
+  var rr = rrnCol ? String(row.v[rrnCol] || '').replace(/\D/g, '') : '', ph = String(row.v['연락처'] || '').replace(/\D/g, ''), ac = String(row.v['계좌번호'] || '').replace(/\D/g, '');
+  if (rr.length === 13 && t.indexOf(rr) >= 0) sc += 4;
+  if (ph.length >= 10 && t.indexOf(ph) >= 0) sc += 2;
+  if (ac.length >= 8 && t.indexOf(ac) >= 0) sc += 2;
+  return sc;
 }
+// 그 사람의 기존 계약서(기본 샘플): 이름이 계약서에 있고 번호(주민번호/연락처/계좌)가 맞는 것 중 시작일이 가장 최근인 것
+function ownMatch(row) {
+  var raw = nn(row.v['성명']), base = baseName(raw);
+  if (base.length < 2) return { c: null, n: 0, byId: false };
+  var pm = periodOf(row);
+  var scored = S.contracts.filter(function (c) { return c.paras && (c.owner === base || textKey(c).indexOf(base) >= 0); })
+    .map(function (c) { return { c: c, s: idScore(c, row) }; });
+  var idm = scored.filter(function (x) { return x.s > 0; }), byId = idm.length > 0;
+  var pool = byId ? idm : scored.filter(function (x) { return raw === base && x.c.owner === base; });
+  var best = null;
+  pool.forEach(function (x) {
+    var c = x.c, st = c.per ? c.per.start : '', en = c.per ? c.per.end : '';
+    var same = pm && c.per && st === pm[0] && en === pm[1] ? 1 : 0;
+    var key = [st, same, en];
+    if (!best || key[0] > best.key[0] || (key[0] === best.key[0] && (key[1] > best.key[1] || (key[1] === best.key[1] && key[2] > best.key[2])))) best = { c: c, key: key };
+  });
+  return { c: best ? best.c : null, n: pool.length, byId: byId, suffix: raw !== base };
+}
+function ownContract(row) { return ownMatch(row).c; }
 function stubPlan(row, why) {
   return { rowNo: row.n, name: String(row.v['성명'] || '').trim(), office: row.v['office'] || '', kind: row.v['구분'] || '', old: null, nw: null, n: null, status: 'no', reasons: [why], warns: [], edits: [], contract: null, sign: null };
 }
 // 샘플 한 부로 한 사람의 계약서 계획을 세운다 (근로계약서 표가 있는 양식은 기존 방식, 그 밖의 양식은 일반 방식)
 function planFor(row, sample, ns, ne, keepNameWarn) {
   if (!sample) return stubPlan(row, '계약서(샘플)를 찾지 못함: 위에서 샘플을 골라 적용해 주세요');
+  var origName = String(row.v['성명'] || '').trim(), cn = baseName(origName);
+  if (cn && cn !== nn(origName)) { row = { n: row.n, v: Object.assign({}, row.v, { '성명': cn }), col0: row.col0 }; }
   var it;
   if (sample.isEmployment && sample.worker && sample.rrn) {
     it = HC.buildNewHirePlan(S.sheet, [row], S.contracts, { templateMode: 'fixed', template: sample, periodMode: 'custom', customStart: ns, customEnd: ne, signMode: 'start' })[0];
@@ -1526,16 +1573,18 @@ function planFor(row, sample, ns, ne, keepNameWarn) {
   it.warns = it.warns.filter(function (w) { return w.indexOf('본보기:') !== 0 && (keepNameWarn || w.indexOf('같은 이름의 계약서 파일') < 0) && w.indexOf('본보기 계약서가 본인') < 0; });
   if (it.status === 'warn' && !it.warns.length) it.status = 'ok';
   it.sample = sample;
+  if (cn && cn !== nn(origName)) it.label = origName;
   return it;
 }
 function planRenew(row) {
   var old = periodOf(row);
   if (!old) return stubPlan(row, '시트에 정해진 계약기간이 없음');
   var forced = S.sampleFor[row.n] ? byRel(S.sampleFor[row.n]) : null;
-  var sample = forced || ownContract(row);
+  var om = forced ? null : ownMatch(row), sample = forced || om.c;
   var np = HC.newPeriod(old[0], old[1], S.months[row.n] || S.batch);
   var it = planFor(row, sample, np.ns, np.ne, false);
   it.old = old; it.n = np.n; it.forced = !!forced;
+  if (om && om.c && it.status !== 'no') { if (om.byId && om.suffix) it.warns.push('이름 뒤 표시 때문에 주민번호/연락처로 계약서를 맞춤: ' + om.c.rel.split('/').pop()); if (om.n > 1) it.warns.push('같은 사람의 계약서가 ' + om.n + '개 있어 시작일이 가장 최근인 것을 사용함: ' + om.c.rel.split('/').pop()); }
   if (sample && !forced && sample.per && (sample.per.start !== old[0] || sample.per.end !== old[1]) && it.status !== 'no') { it.warns.push('본인 계약서의 기간(' + sample.per.start + '~' + sample.per.end + ')이 시트와 다름'); if (it.status === 'ok') it.status = 'warn'; }
   return it;
 }
@@ -1592,7 +1641,7 @@ function render() {
   if ($('app').classList.contains('hide')) return;
   ['home', 'renew', 'new', 'confirm'].forEach(function (k) { $('nav-' + k).classList.toggle('on', S.screen === k); });
   $('title').textContent = TITLES[S.screen];
-  $('stat').innerHTML = S.loaded ? '시트 ' + S.sheet.rows.length + '행<br>계약서 ' + S.contracts.length + '개 읽음' : '불러오는 중...';
+  $('stat').innerHTML = S.loaded ? '시트 ' + S.sheet.rows.length + '행<br>계약서 ' + S.contracts.length + '개 읽음<br><span style="font-size:11px">버전 ' + VERSION + '</span>' : '불러오는 중...';
   $('topchips').innerHTML = '<span class="tag ' + (S.loaded ? 'ok' : 'warn') + '">' + (S.loaded ? '시트 연결됨' : '준비 중') + '</span> <span class="tag new">오늘 ' + todayStr() + '</span>';
   var v = $('view');
   if (S.err) { v.innerHTML = '<div class="card"><b>불러오지 못했습니다</b><p class="msg err">' + esc(S.err) + '</p><button class="btn pri" data-act="setup">설정으로 돌아가기</button></div>'; return; }
@@ -1636,7 +1685,7 @@ function rRenew() {
     var info = p.edits.length ? p.edits.map(function (e) { return '<span class="tag warn">' + esc(e.label) + '</span>'; }).join(' ') : '<span class="tag ok">날짜만</span>';
     var memo = (no ? p.warns : p.reasons.concat(p.warns)).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
     return grpRow(r, last, rows, 11) + '<tr class="' + (on ? 'sel' : no ? 'no' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '" data-act="pick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
-      '<td class="nw"><b>' + esc(p.name) + '</b>' + (no ? '<div class="why">' + (S.sampleFor[r.n] || p.sample ? '만들 수 없음: ' : '') + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(p.office) + '</td><td class="nw"><b>' + esc(p.kind) + '</b></td><td>' + ddTag(d) + '</td>' +
+      '<td class="nw"><b>' + esc(p.label || p.name) + '</b>' + (no ? '<div class="why">' + (S.sampleFor[r.n] || p.sample ? '만들 수 없음: ' : '') + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(p.office) + '</td><td class="nw"><b>' + esc(p.kind) + '</b></td><td>' + ddTag(d) + '</td>' +
       '<td class="nw">' + (p.old ? fd(p.old[0]) + ' ~ ' + fd(p.old[1]) : '') + '</td>' +
       '<td style="min-width:120px">' + (no ? '' : '<select data-act="months" data-n="' + r.n + '">' + monthOpts(p.n, false) + '</select>') + '</td>' +
       '<td class="nw"><b style="color:#3A2470">' + (p.nw ? fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) : '') + '</b></td>' +
