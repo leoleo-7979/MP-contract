@@ -66,6 +66,8 @@ td input.miss{border-color:#C9355A;background:#FFF5F7}
 .note{background:#FBF1F7;border-radius:12px;padding:12px 16px;font-size:14px;line-height:1.7;color:#4B3D5E}
 .bar{height:8px;border-radius:99px;background:#EADFF0;overflow:hidden}.bar i{display:block;height:100%;background:var(--pur);width:0}
 @media (max-width:900px){.shell{flex-direction:column}.side{position:static;height:auto;flex:none}.cards4,.cards3{grid-template-columns:repeat(2,minmax(0,1fr))}.main{padding:20px 16px}}
+
+.why{font-size:12px;color:#B3261E;font-weight:400;white-space:normal;max-width:240px;line-height:1.4;margin-top:2px}
 </style>
 </head>
 <body>
@@ -943,12 +945,346 @@ var HC = (function () {
     return out;
   }
 
+
+  // ============================================================ 샘플 방식: 양식이 달라도 샘플 계약서의 사람 정보·날짜를 바꿔 새 계약서 만들기
+  var RRN_G = /(\d{6})\s*-\s*(\d{7})/g;
+  var PHONE_G = /0\d{1,2}\s*-\s*\d{3,4}\s*-\s*\d{4}/g;
+  var DATE_G = /(\d{4})(\s*년\s*)(\d{1,2})(\s*월\s*)(\d{1,2})(\s*일)/g;
+  var BANK_RE = /(KB국민|국민|우리|신한|하나|NH농협|농협|IBK기업|기업|카카오뱅크|카카오|토스뱅크|토스|케이뱅크|SC제일|제일|씨티|우체국|새마을금고|새마을|신협|수협|산업|부산|대구|경남|광주|전북|제주)\s*(은행|뱅크)?/;
+  var COMPANY_ADDR = ['테헤란로44길', '역삼동706', '아이콘역삼빌딩'];
+  var LABELS = /^(성명|주민등록번호|주민번호|주소|연락처|전화번호|휴대폰|개설은행|개설계좌|은행|계좌번호|계좌|생년월일|대표자|회사명|상호|갑|을|사용자|근로자|사업자번호)\s*[:：]?\s*$/;
+  var nS = function (s) { return String(s || '').replace(/[\s,.\-()·:：]/g, ''); };
+  var digitsOf = function (s) { return String(s || '').replace(/\D/g, ''); };
+  var nameKey = function (s) { return String(s || '').replace(/\s+/g, ''); };
+
+  function dateTokens(p) {
+    var out = [], m; DATE_G.lastIndex = 0;
+    while ((m = DATE_G.exec(p))) out.push({ at: m.index, text: m[0], y: +m[1], m: +m[3], d: +m[5], sepY: m[2], sepM: m[4], sepD: m[6], mTxt: m[3], dTxt: m[5] });
+    return out;
+  }
+  function fmtDateLike(tok, isoDate) {
+    var p = parseISO(isoDate);
+    var mm = tok.mTxt.length === 2 || /^0/.test(tok.mTxt) ? pad2(p.m) : String(p.m);
+    var dd = tok.dTxt.length === 2 || /^0/.test(tok.dTxt) ? pad2(p.d) : String(p.d);
+    return p.y + tok.sepY + mm + tok.sepM + dd + tok.sepD;
+  }
+  // 계약서 한 부에서 '계약기간'(두 날짜) 문단 찾기
+  function genericPeriod(ps) {
+    for (var i = 0; i < ps.length; i++) {
+      var t = dateTokens(ps[i]);
+      if (t.length >= 2 && /부터|~|까지|기간|일시/.test(ps[i])) return { idx: i, start: iso(t[0].y, t[0].m, t[0].d), end: iso(t[1].y, t[1].m, t[1].d) };
+    }
+    return null;
+  }
+  // 계약서 본문에 나오는 시트 이름 중 가장 많이 나온 이름 = 계약서 주인
+  function ownerOfParas(ps, names, skip) {
+    var text = nameKey(ps.join('\n')), best = null, bc = 0;
+    names.forEach(function (n) {
+      if (n.length < 2 || (skip && skip[n])) return;
+      var c = 0, i = -1;
+      while ((i = text.indexOf(n, i + 1)) >= 0) c++;
+      if (c > bc || (c === bc && c > 0 && best && n.length > best.length)) { best = n; bc = c; }
+    });
+    return best;
+  }
+  function isCompanyAddr(s) { var n = nS(s); return COMPANY_ADDR.some(function (k) { return n.indexOf(k) >= 0; }); }
+  function isContinuation(s) {
+    var t = String(s || '').trim();
+    if (!t || t.length > 30 || LABELS.test(t)) return false;
+    return /^[:：]?\s*[\w가-힣\-\s,.()]*(동|호|층|번지)\s*\d*\s*(호)?\s*$/.test(t) && /\d/.test(t);
+  }
+  // 근로자 주소 칸(들) 찾기: [{idx, span, prefix, text}]
+  function findAddrBlocks(ps) {
+    var blocks = [];
+    for (var i = 0; i < ps.length; i++) {
+      var t = ps[i], m;
+      var addrOnly = /^(\s*주소\s*[:：]\s*)(\S.*?)\s*$/.exec(t);          // '주소: 값' 한 문단
+      var colonOnly = /^(\s*[:：]\s*)(\S.*?)\s*$/.exec(t);                  // ': 값' (앞 문단이 '주소')
+      var prev = i > 0 ? ps[i - 1].trim() : '';
+      var start = null;
+      if (addrOnly && !isCompanyAddr(addrOnly[2])) start = { prefix: addrOnly[1], text: addrOnly[2] };
+      else if (/^주소\s*[:：]?$/.test(prev) && colonOnly && !isCompanyAddr(colonOnly[2])) start = { prefix: colonOnly[1], text: colonOnly[2] };
+      else if (/^주소\s*[:：]?$/.test(prev) && t.trim() && !LABELS.test(t.trim()) && !isCompanyAddr(t) && !/^[:：]/.test(t.trim())) start = { prefix: (/^\s*/.exec(t) || [''])[0], text: t.trim() };
+      if (!start || !/[가-힣]/.test(start.text)) continue;
+      var span = 1, full = start.text;
+      while (span < 3 && i + span < ps.length && isContinuation(ps[i + span])) { full += ' ' + ps[i + span].trim(); span++; }
+      blocks.push({ idx: i, span: span, prefix: start.prefix, text: full });
+    }
+    return blocks;
+  }
+  function workerBlocks(ps) {
+    var all = findAddrBlocks(ps);
+    if (!all.length) return [];
+    var first = nS(all[0].text), out = [];
+    all.forEach(function (b) {
+      var n = nS(b.text), cp = 0;
+      while (cp < n.length && cp < first.length && n.charAt(cp) === first.charAt(cp)) cp++;
+      if (cp >= 8 || n === first || first.indexOf(n) === 0 || n.indexOf(first) === 0) out.push(b);
+    });
+    return out;
+  }
+
+  // 샘플 계약서 분석: 샘플 주인의 이름·주민번호·연락처·주소·은행·계좌·생년월일·날짜가 어디 있는지
+  // ctx = { names:[정규화 이름], skipNames:{}, commonPhones:{숫자:true} }
+  function analyzeSample(c, ctx) {
+    var ps = c.paras || [], an = { owner: null, old: {}, addrBlocks: [], notes: [], period: null, signIdx: [], form: '기타' };
+    var head = (ps.slice(0, 3).join(' ') + ' ').replace(/\s+/g, '');
+    an.form = c.isEmployment ? '근로계약서' : /프리랜서|용역/.test(head) ? '프리랜서 용역' : /근로계약/.test(head) ? '근로계약서' : '기타';
+    an.owner = c.owner || (c.worker && c.worker.name) || ownerOfParas(ps, ctx.names, ctx.skipNames);
+    // 주민번호
+    var rr = [];
+    ps.forEach(function (p) { var m; RRN_G.lastIndex = 0; while ((m = RRN_G.exec(p))) rr.push(m[1] + m[2]); });
+    an.old.rrn = rr[0] || null;
+    an.rrnAll = rr.filter(function (v, i) { return rr.indexOf(v) === i; });
+    // 연락처 (회사 번호는 여러 계약서에 공통으로 나오므로 제외)
+    var ph = [];
+    ps.forEach(function (p, i) { var m; PHONE_G.lastIndex = 0; while ((m = PHONE_G.exec(p))) { var d = digitsOf(m[0]); if (!(ctx.commonPhones && ctx.commonPhones[d])) ph.push({ idx: i, digits: d, text: m[0] }); } });
+    var rrIdx = -1; ps.forEach(function (p, i) { if (rrIdx < 0 && /(\d{6})\s*-\s*(\d{7})/.test(p)) rrIdx = i; });
+    var after = ph.filter(function (x) { return x.idx >= rrIdx; });
+    var pick = (after.length ? after : ph)[0];
+    an.old.phone = pick ? pick.digits : null;
+    an.phoneAll = ph.map(function (x) { return x.digits; }).filter(function (v, i, a) { return a.indexOf(v) === i; });
+    // 주소
+    an.addrBlocks = workerBlocks(ps);
+    an.old.addr = an.addrBlocks.length ? an.addrBlocks[0].text : null;
+    // 계좌·은행
+    var acct = null, bank = null;
+    for (var i = 0; i < ps.length && !acct; i++) {
+      if (/계좌/.test(ps[i]) || (i > 0 && /계좌/.test(ps[i - 1]) && ps[i - 1].trim().length < 8)) {
+        var m2 = /(\d{2,}(?:\s*-\s*\d+){1,}|\d{9,})/.exec(ps[i].replace(/\(.*?\)/g, ' '));
+        if (m2 && digitsOf(m2[1]).length >= 8) { acct = m2[1]; var seg = ps[i]; var bm = BANK_RE.exec(seg); if (!bm && i > 0) bm = BANK_RE.exec(ps[i - 1]); if (!bm && i > 1) bm = BANK_RE.exec(ps[i - 2]); bank = bm ? bm[0] : null; an.acctIdx = i; }
+      }
+    }
+    if (!acct) { for (var q = 1; q < ps.length && !acct; q++) { if (/개설계좌|계좌번호/.test(ps[q - 1]) && /^\s*\d[\d-]{6,}\s*$/.test(ps[q])) { acct = ps[q].trim(); an.acctIdx = q; } } }
+    if (acct && !bank) { for (var q2 = 1; q2 < ps.length && !bank; q2++) { if (/개설은행|은행/.test(ps[q2 - 1]) && ps[q2 - 1].trim().length < 8 && BANK_RE.test(ps[q2])) bank = ps[q2].trim(); } }
+    an.old.acct = acct ? acct.trim() : null; an.old.bank = bank ? bank.trim() : null;
+    // 생년월일 (칸이 있는 양식만)
+    for (var b = 1; b < ps.length; b++) { if (/^생년월일\s*[:：]?$/.test(ps[b - 1].trim()) && /\d{4}\D+\d{1,2}\D+\d{1,2}/.test(ps[b])) { an.old.birth = ps[b].trim(); an.birthIdx = b; break; } }
+    // 날짜: 계약기간 문단, 계약일(체결일) 문단
+    an.period = genericPeriod(ps);
+    ps.forEach(function (p, i) {
+      var t = dateTokens(p);
+      if (!t.length || (an.period && i === an.period.idx)) return;
+      var core = p.replace(/\r/g, '');
+      var alone = core.replace(DATE_G, '').replace(/[\s:：.]/g, '') === '';
+      var lab = /^\s*(계약일자|계약일|체결일|작성일)\s*[:：]?\s*/.test(core) && t.length === 1;
+      if ((alone && t.length === 1) || lab) an.signIdx.push(i);
+    });
+    if (!an.owner) an.notes.push('샘플 계약서의 주인(이름)을 시트에서 찾지 못함');
+    return an;
+  }
+
+  // 문단 목록에 바꿀 내용을 적용해 {문단번호: 새 글자} 를 만든다
+  // sp = { old:{name,rrn,phone,addrBlocks,acct,bank,birthIdx}, nw:{name,rrn,phone,addr,acct,bank,birth}, ns, ne, sign, periodIdx, signIdx[] }
+  function buildJobs(ps, sp) {
+    var jobs = {}, found = { name: 0, rrn: 0, phone: 0, addr: 0, acct: 0, bank: 0, birth: 0, period: 0, sign: 0 };
+    var cur = function (i) { return jobs[i] !== undefined ? jobs[i] : ps[i]; };
+    var o = sp.old, n = sp.nw;
+    // 주소 (여러 문단으로 나뉜 주소는 첫 문단에 새 주소, 나머지는 비움)
+    if (o.addrBlocks && o.addrBlocks.length && n.addr) {
+      o.addrBlocks.forEach(function (b) {
+        if (ps[b.idx] === undefined) return;
+        jobs[b.idx] = b.prefix + n.addr;
+        for (var k = 1; k < b.span; k++) jobs[b.idx + k] = '';
+        found.addr++;
+      });
+    }
+    // 은행·계좌
+    if (o.acct && n.acct) {
+      var od = digitsOf(o.acct);
+      ps.forEach(function (p, i) {
+        var t = cur(i), ch = false;
+        t = t.replace(/\d[\d\s-]{6,}\d/g, function (m) { if (digitsOf(m) === od) { ch = true; return n.acct; } return m; });
+        if (ch) { found.acct++; if (o.bank && n.bank && t.indexOf(o.bank) >= 0) { t = t.split(o.bank).join(n.bank); found.bank++; } jobs[i] = t; }
+        else if (o.bank && n.bank && t.trim() === o.bank && i > 0 && /은행/.test(ps[i - 1]) && ps[i - 1].trim().length < 8) { jobs[i] = t.replace(o.bank, n.bank); found.bank++; }
+      });
+    }
+    // 생년월일 칸
+    if (sp.old.birthIdx !== undefined && n.birth) { jobs[sp.old.birthIdx] = n.birth; found.birth++; }
+    // 주민번호
+    if (o.rrn && n.rrn) {
+      var rre = new RegExp(o.rrn.slice(0, 6) + '\\s*-\\s*' + o.rrn.slice(6), 'g');
+      ps.forEach(function (p, i) { var t = cur(i); if (rre.test(t)) { rre.lastIndex = 0; jobs[i] = t.replace(rre, function () { return n.rrn; }); found.rrn++; } rre.lastIndex = 0; });
+    }
+    // 연락처
+    if (o.phone && n.phone) {
+      ps.forEach(function (p, i) {
+        var t = cur(i), ch = false;
+        t = t.replace(PHONE_G, function (m) { if (digitsOf(m) === o.phone) { ch = true; return n.phone; } return m; });
+        if (ch) { jobs[i] = t; found.phone++; }
+      });
+    }
+    // 이름 (띄어 쓴 이름 포함)
+    if (o.name && n.name) {
+      var okey = nameKey(o.name), nk = nameKey(n.name);
+      var spRe = new RegExp('(^|[^가-힣])' + okey.split('').join('([ \\u00a0]{1,3})') + '(?![가-힣])', 'g');
+      ps.forEach(function (p, i) {
+        var t0 = cur(i), t = t0;
+        t = t.replace(spRe, function (m0, pre, g1) { return pre + nk.split('').join(g1 || ' '); });
+        t = t.split(okey).join(nk);
+        if (t !== t0) { jobs[i] = t; found.name++; }
+        else if (okey === nk && (t0.indexOf(okey) >= 0 || (spRe.lastIndex = 0, spRe.test(t0)))) { spRe.lastIndex = 0; found.name++; }
+      });
+    }
+    // 날짜
+    if (sp.ns) {
+      if (sp.periodIdx !== undefined && ps[sp.periodIdx] !== undefined) {
+        var tk = dateTokens(cur(sp.periodIdx));
+        if (tk.length >= 2) {
+          var s = cur(sp.periodIdx);
+          s = s.slice(0, tk[1].at) + fmtDateLike(tk[1], sp.ne) + s.slice(tk[1].at + tk[1].text.length);
+          s = s.slice(0, tk[0].at) + fmtDateLike(tk[0], sp.ns) + s.slice(tk[0].at + tk[0].text.length);
+          jobs[sp.periodIdx] = s; found.period++;
+        }
+      }
+      (sp.signIdx || []).forEach(function (i) {
+        var tk2 = dateTokens(cur(i));
+        if (tk2.length !== 1) return;
+        var s2 = cur(i);
+        jobs[i] = s2.slice(0, tk2[0].at) + fmtDateLike(tk2[0], sp.sign) + s2.slice(tk2[0].at + tk2[0].text.length);
+        found.sign++;
+      });
+    }
+    return { jobs: jobs, found: found };
+  }
+
+  function applyJobsToData(data, jobs, log) {
+    var tp = textParas(data), ps = tp.paras, reps = [], applied = [];
+    Object.keys(jobs).forEach(function (key) {
+      var idx = +key, p = ps[idx];
+      if (!p) { log.push('문단 번호 오류'); return; }
+      if (jobs[key] === p.text) return;
+      if (p.raw !== p.text + '\r') { log.push('서식 문자가 섞인 문단(' + idx + ')이라 바꾸지 못함'); return; }
+      if (p.hdr < 0) { log.push('문단 머리를 찾지 못함'); return; }
+      var r = buildParaBytes(data, tp.recs, p.hdr, jobs[key]);
+      if (!r) { log.push('지원하지 않는 문단 구조(' + idx + ')라 바꾸지 못함'); return; }
+      reps.push(r); applied.push({ idx: idx, newText: jobs[key] });
+    });
+    reps.sort(function (a, b) { return a.start - b.start; });
+    var parts = [], pos = 0, total = 0;
+    reps.forEach(function (r) { parts.push(data.subarray(pos, r.start)); parts.push(r.bytes); pos = r.end; });
+    parts.push(data.subarray(pos));
+    parts.forEach(function (p) { total += p.length; });
+    var out = new Uint8Array(total), o = 0;
+    parts.forEach(function (p) { out.set(p, o); o += p.length; });
+    return { data: out, applied: applied };
+  }
+  function updatePrvPairs(cfb, pairs) {
+    try {
+      if (!cfb.has(['PrvText'])) return;
+      var pb = cfb.read(['PrvText']), prv = new TextDecoder('utf-16le').decode(pb);
+      pairs.forEach(function (pr) {
+        if (!pr[0]) return;
+        if (pr.re) prv = prv.replace(pr[0], function () { return pr[1]; });
+        else prv = prv.split(pr[0]).join(pr[1]);
+      });
+      var L = pb.length / 2;
+      prv = prv.length > L ? prv.slice(0, L) : prv + new Array(L - prv.length + 1).join(' ');
+      cfb.writeSameSize(['PrvText'], utf16(prv));
+    } catch (e) { /* 미리보기만 못 바꾼 경우 */ }
+  }
+  // 샘플 계약서(u8)를 sp 대로 바꾼 새 파일을 만든다
+  function patchGeneric(u8, sp) {
+    var copy = new Uint8Array(u8), sec = loadSection0(copy), log = [];
+    if (!sec.compressed) throw new Error('압축되지 않은 파일은 바꿀 수 없습니다');
+    var data = new Uint8Array(sec.data), ps = textParas(data).paras.map(function (p) { return p.text; });
+    var bj = buildJobs(ps, sp);
+    var r = applyJobsToData(data, bj.jobs, log);
+    var capy = sec.cfb.capacity(['BodyText', 'Section0']);
+    var nr = capy ? deflateFlexible(r.data, capy.low, capy.cap) : null;
+    if (!nr) throw new Error('수정한 내용이 들어갈 공간이 부족합니다(한글에서 직접 수정이 필요)');
+    sec.cfb.resizeInSectors(['BodyText', 'Section0'], nr);
+    var o = sp.old, n = sp.nw, pairs = [];
+    if (o.rrn && n.rrn) pairs.push([new RegExp(o.rrn.slice(0, 6) + '\\s*-\\s*' + o.rrn.slice(6), 'g'), n.rrn]), pairs[pairs.length - 1].re = true;
+    if (o.addrBlocks && o.addrBlocks.length && n.addr) o.addrBlocks.forEach(function (b) { pairs.push([b.text, n.addr]); });
+    if (o.acct && n.acct) pairs.push([o.acct, n.acct]);
+    if (o.bank && n.bank) pairs.push([o.bank, n.bank]);
+    if (o.name && n.name) pairs.push([nameKey(o.name), nameKey(n.name)]);
+    if (sp.ns && sp.oldDates) sp.oldDates.forEach(function (d) { pairs.push([d[0], d[1]]); });
+    updatePrvPairs(sec.cfb, pairs);
+    return { bytes: copy, log: log, applied: r.applied, found: bj.found };
+  }
+  // 만든 파일에 이전 사람 정보가 남았는지 검사 (남은 항목 이름 목록)
+  function genericLeftovers(bytes, sp) {
+    var b = readContractInfo(bytes), ps = b.paras || [], text = ps.join('\n'), flat = nameKey(text), out = [];
+    var o = sp.old, n = sp.nw;
+    if (o.name && nameKey(n.name).indexOf(nameKey(o.name)) < 0 && flat.indexOf(nameKey(o.name)) >= 0) out.push('이전 사람 이름');
+    if (o.rrn && digitsOf(n.rrn) !== o.rrn && digitsOf(text).indexOf(o.rrn) >= 0) out.push('이전 사람 주민등록번호');
+    if (o.acct && digitsOf(n.acct) !== digitsOf(o.acct) && digitsOf(o.acct).length >= 8 && digitsOf(text).indexOf(digitsOf(o.acct)) >= 0) out.push('이전 사람 계좌번호');
+    if (o.phone && digitsOf(n.phone) !== o.phone && digitsOf(text).indexOf(o.phone) >= 0) out.push('이전 사람 연락처');
+    if (o.addr) {
+      var oa = nS(o.addr), na = nS(n.addr), pre = oa.slice(0, 10), nt = nS(text);
+      if (oa.length >= 6 && oa !== na && (nt.indexOf(oa) >= 0 || (pre.length >= 8 && na.indexOf(pre) < 0 && nt.indexOf(pre) >= 0))) out.push('이전 사람 주소');
+    }
+    if (sp.ns && sp.oldPeriod) {
+      var toks = []; ps.forEach(function (p) { dateTokens(p).forEach(function (t) { toks.push(iso(t.y, t.m, t.d)); }); });
+      [sp.oldPeriod.start, sp.oldPeriod.end].forEach(function (d) { if (d !== sp.ns && d !== sp.ne && d !== sp.sign && toks.indexOf(d) >= 0 && out.indexOf('이전 계약기간 날짜') < 0) out.push('이전 계약기간 날짜'); });
+    }
+    return out;
+  }
+  // 시트 한 사람 + 샘플 + 새 기간 → 계획 한 건 (건수제 등 근로계약서 표가 없는 양식용)
+  function buildGenericPlan(sheet, row, sample, st, ctx) {
+    var v = row.v, nm = String(v['성명'] || '').trim();
+    var it = { rowNo: row.n, name: nm, office: v['office'] || '', kind: v['구분'] || '', old: null, nw: null, n: null, status: 'no', reasons: [], warns: [], edits: [], contract: sample, sign: null, generic: true, sp: null };
+    var an = sample._an || (sample._an = analyzeSample(sample, ctx));
+    it.analysis = an;
+    if (!nm) { it.reasons.push('성명이 없음'); return it; }
+    if (!an.owner) { it.reasons.push('샘플 계약서의 주인(이름)을 찾지 못함'); return it; }
+    if (!st.ns || !st.ne || st.ne < st.ns) { it.reasons.push('새 계약기간이 올바르지 않음'); return it; }
+    it.nw = [st.ns, st.ne]; it.n = Math.round((diffDays(st.ns, st.ne) + 1) / 30.44);
+    it.sign = st.sign || st.ns;
+    var rrnCol = sheet.headers.filter(function (h) { return /주민/.test(h); })[0];
+    var rrn = rrnCol ? fmtRrn(v[rrnCol]) : null;
+    var addr = String(v['주소'] || '').trim(), bank = String(v['은행'] || '').trim(), acct = String(v['계좌번호'] || '').trim(), phone = String(v['연락처'] || '').trim();
+    var o = an.old, nw = { name: nm, rrn: rrn, addr: addr, bank: bank, acct: acct, phone: phone, birth: null };
+    var need = function (cond, label, val) { if (cond && !val) it.reasons.push(label + ': 시트에 값이 없어 만들 수 없음(샘플에는 칸이 있음)'); };
+    need(!!o.rrn, '주민등록번호', rrn);
+    need(an.addrBlocks.length > 0, '주소', addr);
+    need(!!o.acct, '계좌번호', acct);
+    need(!!o.bank, '은행', bank);
+    need(!!o.phone, '연락처', phone);
+    if (an.birthIdx !== undefined) {
+      var rd = rrn ? digitsOf(rrn) : '';
+      nw.birth = fmtBirth(o.birth, v['생년월일']) || (rd ? fmtBirth(o.birth, birthFromRrn(rd)) : null);
+      need(true, '생년월일', nw.birth);
+    }
+    if (an.period === null && st.ns) it.warns.push('샘플에서 계약기간 문단을 찾지 못함');
+    var sp = { old: { name: an.owner, rrn: o.rrn, phone: o.phone, addrBlocks: an.addrBlocks, acct: o.acct, bank: o.bank, birthIdx: an.birthIdx }, nw: nw, ns: st.ns, ne: st.ne, sign: it.sign, periodIdx: an.period ? an.period.idx : undefined, signIdx: an.signIdx, oldPeriod: an.period, oldDates: [] };
+    var bj = buildJobs(sample.paras, sp);
+    var f = bj.found;
+    if (!f.name) it.reasons.push('샘플에서 이름을 바꿀 곳을 찾지 못함');
+    if (o.rrn && !f.rrn) it.reasons.push('샘플에서 주민번호를 바꿀 곳을 찾지 못함');
+    if (an.period && !f.period) it.reasons.push('샘플에서 계약기간을 바꿀 곳을 찾지 못함');
+    if (!an.period) it.reasons.push('샘플에서 계약기간(두 날짜)을 찾지 못함');
+    if (an.signIdx.length === 0) it.warns.push('샘플에서 계약일자(체결일) 문단을 찾지 못함');
+    if (nameKey(o.name || an.owner) === nameKey(nm)) it.warns.push('샘플 주인과 같은 사람(기존 계약서로 갱신)');
+    // 화면에 보여줄 바뀌는 내용
+    var oldPlain = function (x) { return x == null ? '' : x; };
+    it.edits.push({ field: 'name', label: '이름', old: an.owner, new: nm });
+    if (o.rrn) it.edits.push({ field: 'rrn', label: '주민등록번호', old: o.rrn, new: rrn || '' });
+    if (an.addrBlocks.length) it.edits.push({ field: 'addr', label: '주소', old: an.addrBlocks[0].text, new: addr });
+    if (o.bank) it.edits.push({ field: 'bank', label: '은행', old: o.bank, new: bank });
+    if (o.acct) it.edits.push({ field: 'acct', label: '계좌번호', old: o.acct, new: acct });
+    if (o.phone) it.edits.push({ field: 'phone', label: '연락처', old: oldPlain(o.phone), new: phone });
+    if (an.period) it.old = [an.period.start, an.period.end];
+    sp.oldDates = [];
+    it.sp = sp;
+    if (an.phoneAll.length > 1) it.warns.push('샘플에 연락처가 여러 개 있음(' + an.phoneAll.length + '개): 근로자 번호만 바꿨는지 확인');
+    if (an.rrnAll.length > 1) it.warns.push('샘플에 주민번호가 여러 개 있음: 확인 필요');
+    var hire = looseDate(v['입사일']);
+    if (hire && addMonths(hire, 24) <= st.ne) it.warns.push('입사 2년(' + addMonths(hire, 24) + ')이 새 계약기간 안에 있거나 지남 - 기간제 2년 초과(무기계약 전환) 여부 확인');
+    if (it.reasons.length) { it.status = 'no'; return it; }
+    it.status = it.warns.length ? 'warn' : 'ok';
+    return it;
+  }
+
   return {
     openCFB: openCFB, readContractInfo: readContractInfo, patchContract: patchContract, verifyPatched: verifyPatched,
     parseSheetArrays: parseSheetArrays, applyFilters: applyFilters, buildPlan: buildPlan, newPeriod: newPeriod,
     newFileName: newFileName, summaryCSV: summaryCSV, looseDate: looseDate, addDays: addDays, addMonths: addMonths, fit: fit,
     deflateExact: deflateExact, parseRecords: parseRecords, fmtBirth: fmtBirth,
-    buildNewHirePlan: buildNewHirePlan, newHireFileName: newHireFileName, findLeftovers: findLeftovers, pickTemplate: pickTemplate
+    buildNewHirePlan: buildNewHirePlan, newHireFileName: newHireFileName, findLeftovers: findLeftovers, pickTemplate: pickTemplate,
+    analyzeSample: analyzeSample, buildGenericPlan: buildGenericPlan, patchGeneric: patchGeneric, genericLeftovers: genericLeftovers, genericPeriod: genericPeriod, ownerOfParas: ownerOfParas, dateTokens: dateTokens, diffDays: diffDays, digitsOf: digitsOf
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = HC;
@@ -966,7 +1302,7 @@ var S = {
   screen: 'home', sheet: null, contracts: [], loaded: false, loading: false, loadMsg: '', loadPct: 0, err: '',
   q: 15, batch: 'same', months: {}, picked: {}, doPersonal: true,
   npicked: {}, nedit: {}, np: { mode: 'hire', months: 3, start: '', end: '' }, tplMode: 'auto', tplRel: '',
-  made: [], sel: 0, acks: {}, busy: '', note: '', sheetUrl: '', dir: null, files: null
+  made: [], sel: 0, acks: {}, busy: '', note: '', sheetUrl: '', dir: null, files: null, sampleFor: {}, sampleSel: '', sampleQ: '', tplQ: '', ctx: null
 };
 var rrnCol = '';
 
@@ -1086,7 +1422,7 @@ function loadAll() {
     }
     var w = []; for (var k = 0; k < 4; k++) w.push(one());
     return Promise.all(w);
-  }).then(function () { S.loaded = true; S.loading = false; render(); })
+  }).then(function () { S.loadMsg = '계약서 주인 확인 중...'; render(); return new Promise(function (r) { setTimeout(r, 0); }); }).then(function () { buildCtx(); S.loaded = true; S.loading = false; render(); })
     .catch(function (e) { S.loading = false; S.err = e.message; render(); });
 }
 
@@ -1097,9 +1433,84 @@ function renewRows() {
   return S.sheet.rows.filter(function (r) { var d = dDay(r.v); return d !== null && d <= S.q; })
     .sort(function (a, b) { return dDay(a.v) - dDay(b.v); });
 }
+function formOf(c) { var head = ((c.paras || []).slice(0, 3).join(' ')).replace(/\s+/g, ''); return c.isEmployment || /근로계약/.test(head) ? '근로계약서' : /프리랜서|용역/.test(head) ? '프리랜서 용역' : '기타'; }
+var STOPW = /계약서|계약직|건수제|프리랜서|파트타임|근로|용역|발급|검수|매니저|센터별|작성|완료|신분증|차검수|시간|새폴더|남부|동부|서부|북부|중부|광주|부산|대구|대전|울산|인천|서울|경기|제주|강원|충북|충남|전북|전남|경북|경남|세종|수원|창원|청주|전주|포항/g;
+// 시트에 없는 사람(퇴사자 등)의 계약서: 파일 이름에서 이름을 찾고, 계약서 안에 실제로 있는지 확인
+function ownerFromFile(c) {
+  var base = nn(String(c.rel || '').split('/').pop().replace(/\.hwp$/i, '')).replace(STOPW, ' ');
+  var txt = nn((c.paras || []).join('\n')), best = null, bc = 0;
+  (base.match(/[가-힣]{2,4}/g) || []).forEach(function (t) {
+    var k = 0, i = -1; while ((i = txt.indexOf(t, i + 1)) >= 0) k++;
+    if (k > bc) { best = t; bc = k; }
+  });
+  return best;
+}
+function buildCtx() {
+  var names = [], seen = {};
+  S.sheet.rows.forEach(function (r) { var n = nn(r.v['성명']); if (n.length >= 2 && !seen[n]) { seen[n] = 1; names.push(n); } });
+  var nf = {}, pf = {}, cnt = 0;
+  S.contracts.forEach(function (c) {
+    if (!c.paras) return; cnt++;
+    var t = nn(c.paras.join('\n'));
+    names.forEach(function (n) { if (t.indexOf(n) >= 0) nf[n] = (nf[n] || 0) + 1; });
+    var ph = {}; (c.paras.join('\n').match(/0\d{1,2}\s*-\s*\d{3,4}\s*-\s*\d{4}/g) || []).forEach(function (x) { ph[x.replace(/\D/g, '')] = 1; });
+    Object.keys(ph).forEach(function (p) { pf[p] = (pf[p] || 0) + 1; });
+  });
+  var skip = {}, common = {};
+  Object.keys(nf).forEach(function (n) { if (nf[n] > cnt * 0.3) skip[n] = 1; });
+  Object.keys(pf).forEach(function (p) { if (pf[p] >= 8) common[p] = 1; });
+  S.ctx = { names: names, skipNames: skip, commonPhones: common };
+  S.contracts.forEach(function (c) {
+    if (!c.paras) return;
+    c.owner = (c.worker && c.worker.name ? nn(c.worker.name) : HC.ownerOfParas(c.paras, names, skip)) || ownerFromFile(c);
+    c.form = formOf(c);
+    c.per = c.p1 ? { start: c.p1[0], end: c.p1[1] } : HC.genericPeriod(c.paras);
+  });
+}
+function periodOf(row) { var m = /(\d{4}-\d{2}-\d{2})\s*[_~]\s*(\d{4}-\d{2}-\d{2})/.exec(row.v['정해진 계약기간'] || ''); return m ? [m[1], m[2]] : null; }
+function byRel(rel) { return S.contracts.filter(function (c) { return c.rel === rel && c.paras; })[0] || null; }
+function sampleLabel(c) { return (c.owner || '주인 모름') + ' · ' + c.form + ' · ' + c.rel.split('/').slice(-2).join('/'); }
+function sampleList(q) {
+  var k = nn(q);
+  return S.contracts.filter(function (c) { return c.paras && (!k || nn(sampleLabel(c)).indexOf(k) >= 0); }).sort(function (a, b) { return a.rel < b.rel ? -1 : 1; }).slice(0, 400);
+}
+// 그 사람 이름이 들어 있는 기존 계약서(기본 샘플): 시트의 현재 기간과 같은 것 > 가장 늦게 끝나는 것
+function ownContract(row) {
+  var key = nn(row.v['성명']), pm = periodOf(row), best = null, bs = -1;
+  S.contracts.forEach(function (c) {
+    if (!c.paras || c.owner !== key) return;
+    var sc = (pm && c.per && c.per.start === pm[0] && c.per.end === pm[1]) ? 2 : 1;
+    if (sc > bs || (sc === bs && best && c.per && best.per && c.per.end > best.per.end)) { best = c; bs = sc; }
+  });
+  return best;
+}
+function stubPlan(row, why) {
+  return { rowNo: row.n, name: String(row.v['성명'] || '').trim(), office: row.v['office'] || '', kind: row.v['구분'] || '', old: null, nw: null, n: null, status: 'no', reasons: [why], warns: [], edits: [], contract: null, sign: null };
+}
+// 샘플 한 부로 한 사람의 계약서 계획을 세운다 (근로계약서 표가 있는 양식은 기존 방식, 그 밖의 양식은 일반 방식)
+function planFor(row, sample, ns, ne, keepNameWarn) {
+  if (!sample) return stubPlan(row, '계약서(샘플)를 찾지 못함: 위에서 샘플을 골라 적용해 주세요');
+  var it;
+  if (sample.isEmployment && sample.worker && sample.rrn) {
+    it = HC.buildNewHirePlan(S.sheet, [row], S.contracts, { templateMode: 'fixed', template: sample, periodMode: 'custom', customStart: ns, customEnd: ne, signMode: 'start' })[0];
+    var hire = HC.looseDate(row.v['입사일']);
+    if (it.nw && hire && HC.addMonths(hire, 24) <= ne) it.warns.push('입사 2년(' + HC.addMonths(hire, 24) + ')이 새 계약기간 안에 있거나 지남 - 기간제 2년 초과(무기계약 전환) 여부 확인');
+  } else it = HC.buildGenericPlan(S.sheet, row, sample, { ns: ns, ne: ne, sign: ns }, S.ctx);
+  it.warns = it.warns.filter(function (w) { return w.indexOf('본보기:') !== 0 && (keepNameWarn || w.indexOf('같은 이름의 계약서 파일') < 0) && w.indexOf('본보기 계약서가 본인') < 0; });
+  if (it.status === 'warn' && !it.warns.length) it.status = 'ok';
+  it.sample = sample;
+  return it;
+}
 function planRenew(row) {
-  var st = { doPeriod: true, doPersonal: S.doPersonal, mode: 'next', months: S.months[row.n] || S.batch, signMode: 'start', excludeLeave: false, leaveWords: '' };
-  return HC.buildPlan(S.sheet, [row], S.contracts, st)[0];
+  var old = periodOf(row);
+  if (!old) return stubPlan(row, '시트에 정해진 계약기간이 없음');
+  var forced = S.sampleFor[row.n] ? byRel(S.sampleFor[row.n]) : null;
+  var sample = forced || ownContract(row);
+  var np = HC.newPeriod(old[0], old[1], S.months[row.n] || S.batch);
+  var it = planFor(row, sample, np.ns, np.ne, false);
+  it.old = old; it.n = np.n; it.forced = !!forced;
+  if (sample && !forced && sample.per && (sample.per.start !== old[0] || sample.per.end !== old[1]) && it.status !== 'no') { it.warns.push('본인 계약서의 기간(' + sample.per.start + '~' + sample.per.end + ')이 시트와 다름'); if (it.status === 'ok') it.status = 'warn'; }
+  return it;
 }
 function newRows() { return S.sheet.rows.filter(function (r) { return isNew(r.v); }); }
 var EDIT_COLS = ['입사일', '생년월일', '주소', '은행', '계좌번호'];
@@ -1108,16 +1519,18 @@ function editedRow(row) {
   Object.keys(o).forEach(function (k) { v[k] = o[k]; });
   return { n: row.n, v: v, col0: row.col0 };
 }
-function tplList() {
-  return S.contracts.filter(function (c) { return c.isEmployment && c.worker && c.rrn; })
-    .sort(function (a, b) { return a.rel < b.rel ? -1 : 1; });
+function newPeriodFor(er) {
+  var m = S.np.mode;
+  if (m === 'hire') { var h = HC.looseDate(er.v['입사일']); return h ? [h, HC.addDays(HC.addMonths(h, +S.np.months || 3), -1)] : null; }
+  if (m === 'sheet') return periodOf(er);
+  return S.np.start && S.np.end ? [S.np.start, S.np.end] : null;
 }
-function nSettings() {
-  var st = { templateMode: S.tplMode, template: null, periodMode: S.np.mode, hireMonths: S.np.months, customStart: S.np.start, customEnd: S.np.end, signMode: 'start' };
-  if (S.tplMode === 'fixed') st.template = tplList().filter(function (c) { return c.rel === S.tplRel; })[0] || null;
-  return st;
+function planNew(row) {
+  var er = editedRow(row), per = newPeriodFor(er);
+  var sample = S.tplMode === 'fixed' ? byRel(S.tplRel) : HC.pickTemplate(S.contracts.filter(function (c) { return c.isEmployment && c.worker && c.rrn; }), er.v);
+  if (!per) return stubPlan(er, '계약기간을 정할 수 없음(입사일 또는 시트의 계약기간이 없음)');
+  return planFor(er, sample, per[0], per[1], true);
 }
-function planNew(row) { return HC.buildNewHirePlan(S.sheet, [editedRow(row)], S.contracts, nSettings())[0]; }
 
 // ---------- 화면
 var TITLES = { home: '메인 메뉴', renew: '재직자 갱신', new: '신규 입사', confirm: '만든 계약서 확인' };
@@ -1163,31 +1576,37 @@ function rRenew() {
   };
   var body = rows.map(function (r, i) {
     var p = plans[i], no = p.status === 'no', on = !!S.picked[r.n] && !no, d = dDay(r.v);
-    var info = p.edits.length ? p.edits.map(function (e) { return '<span class="tag warn">' + esc(e.label) + ' 변경</span>'; }).join(' ') : '<span class="tag ok">변경 없음</span>';
+    var info = p.edits.length ? p.edits.map(function (e) { return '<span class="tag warn">' + esc(e.label) + '</span>'; }).join(' ') : '<span class="tag ok">날짜만</span>';
     var memo = p.reasons.concat(p.warns).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
-    return '<tr class="' + (no ? 'no' : on ? 'sel' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '"' + (no ? ' disabled' : '') + ' data-act="pick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
-      '<td class="nw"><b>' + esc(p.name) + '</b></td><td class="nw">' + esc(p.office) + '</td><td>' + ddTag(d) + '</td>' +
+    return '<tr class="' + (no ? 'no' : on ? 'sel' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '"' + (no ? ' disabled' : '') + ' data-act="pick" data-n="' + r.n + '" aria-label="선택"' + (no ? ' title="' + esc(p.reasons.join(', ')) + '"' : '') + '>' + (on ? '✓' : '') + '</button></td>' +
+      '<td class="nw"><b>' + esc(p.name) + '</b>' + (no ? '<div class="why">만들 수 없음: ' + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(p.office) + '</td><td class="nw"><b>' + esc(p.kind) + '</b></td><td>' + ddTag(d) + '</td>' +
       '<td class="nw">' + (p.old ? fd(p.old[0]) + ' ~ ' + fd(p.old[1]) : '') + '</td>' +
       '<td style="min-width:120px">' + (no ? '' : '<select data-act="months" data-n="' + r.n + '">' + monthOpts(p.n, false) + '</select>') + '</td>' +
       '<td class="nw"><b style="color:#3A2470">' + (p.nw ? fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) : '') + '</b></td>' +
+      '<td style="font-size:13px;min-width:170px">' + (p.sample ? '<b>' + esc(p.sample.owner || '') + '</b> <span class="tag ' + (p.forced ? 'new' : 'ok') + '">' + (p.forced ? '고른 샘플' : '본인 계약서') + '</span><br>' + esc(p.sample.form) : '') + '</td>' +
       '<td>' + (no ? '' : info) + '</td><td style="font-size:13px;min-width:200px">' + memo + '</td></tr>';
   }).join('');
-  return '<div class="card row">' +
+  var sopts = sampleList(S.sampleQ), sel = '<option value="">(샘플을 고르세요)</option>' + sopts.map(function (c) { return '<option value="' + esc(c.rel) + '"' + (c.rel === S.sampleSel ? ' selected' : '') + '>' + esc(sampleLabel(c)) + '</option>'; }).join('');
+  var sampleCard = '<div class="card"><div class="row" style="gap:10px"><b>샘플 계약서</b>' +
+    '<input class="sel" data-act="sq" value="' + esc(S.sampleQ) + '" placeholder="이름·양식·폴더로 찾기" aria-label="샘플 찾기" style="width:200px">' +
+    '<select class="sel" data-act="ssel" style="max-width:460px" aria-label="샘플 계약서">' + sel + '</select>' +
+    '<button class="btn sec" data-act="sapply">선택한 사람에게 적용</button><button class="btn ghost" data-act="sclear">본인 계약서로 되돌리기</button></div>' +
+    '<p class="msg" style="margin:10px 0 0">기본은 그 사람의 기존 계약서(이름이 같은 파일)입니다. 다른 양식이나 샘플로 만들려면 사람을 체크하고 샘플을 골라 &quot;적용&quot;을 누르세요. 샘플의 이름·주민번호·주소·계좌·연락처·날짜만 바뀌고, 임금·대금 등 나머지는 샘플 그대로입니다.</p></div>';
+  return sampleCard + '<div class="card row">' +
     '<div class="field" style="width:150px"><label for="dq">D데이 조회 (D-0 ~ D-N)</label><input id="dq" value="D-' + S.q + '" data-act="dq"></div>' +
     '<div class="row" style="gap:8px">' + [7, 15, 30].map(function (n) { return '<button class="chip' + (S.q === n ? ' on' : '') + '" data-act="dqset" data-q="' + n + '">D-' + n + '</button>'; }).join('') + '</div>' +
     '<div class="grow" style="flex:1"></div>' +
-    '<label class="row" style="gap:6px"><input type="checkbox" data-act="personal"' + (S.doPersonal ? ' checked' : '') + '> 시트와 다른 개인정보도 반영</label>' +
     '<div class="row" style="gap:8px"><span class="lbl">일괄 기간</span><select class="sel" data-act="batch">' + monthOpts(S.batch, true) + '</select>' +
     '<button class="btn sec" data-act="applybatch">선택한 사람에게 적용</button></div></div>' +
-    '<div class="card" style="padding:12px 22px 22px"><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>D데이</th><th>현재 계약기간</th><th>갱신 기간</th><th>새 계약기간</th><th>개인정보</th><th>안내</th></tr></thead><tbody>' +
-    (body || '<tr><td colspan="9" class="lbl">D-' + S.q + ' 이내인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
+    '<div class="card" style="padding:12px 22px 22px"><p class="msg" style="margin:8px 0 12px">D-' + S.q + ' 이내 <b>' + rows.length + '명</b> 중 만들 수 있음 <b>' + plans.filter(function (p) { return p.status !== 'no'; }).length + '명</b>, 만들 수 없음 <b>' + plans.filter(function (p) { return p.status === 'no'; }).length + '명</b> (만들 수 없는 사람은 이름 아래에 이유가 나옵니다)</p><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th><th>D데이</th><th>현재 계약기간</th><th>갱신 기간</th><th>새 계약기간</th><th>계약서(샘플)</th><th>바뀌는 정보</th><th>안내</th></tr></thead><tbody>' +
+    (body || '<tr><td colspan="11" class="lbl">D-' + S.q + ' 이내인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
     '<div class="row" style="justify-content:space-between"><div><button class="btn ghost" data-act="pickall">만들 수 있는 사람 모두 선택</button> <button class="btn ghost" data-act="pickclear">선택 해제</button> &nbsp; 선택 <b>' + pk + '명</b> · 체결일은 새 계약 시작일로 입력됩니다' + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
     '<button class="btn pri" data-act="makeRenew"' + (pk ? '' : ' disabled') + '>계약서 만들기 · 확인 화면으로</button></div>';
 }
 
 function rNew() {
-  var rows = newRows(), plans = rows.map(planNew), lst = tplList();
-  var tplSel = '<select class="sel" data-act="tpl" style="max-width:380px"' + (S.tplMode === 'fixed' ? '' : ' disabled') + '>' + lst.map(function (c) { return '<option value="' + esc(c.rel) + '"' + (c.rel === S.tplRel ? ' selected' : '') + '>' + esc(c.worker.name + ' | ' + c.rel.split('/').slice(-2).join('/')) + '</option>'; }).join('') + '</select>';
+  var rows = newRows(), plans = rows.map(planNew), lst = sampleList(S.tplQ);
+  var tplSel = '<input class="sel" data-act="tq" value="' + esc(S.tplQ) + '" placeholder="이름·양식·폴더로 찾기" aria-label="샘플 찾기" style="width:190px"' + (S.tplMode === 'fixed' ? '' : ' disabled') + '><select class="sel" data-act="tpl" style="max-width:420px"' + (S.tplMode === 'fixed' ? '' : ' disabled') + ' aria-label="샘플 계약서">' + lst.map(function (c) { return '<option value="' + esc(c.rel) + '"' + (c.rel === S.tplRel ? ' selected' : '') + '>' + esc(sampleLabel(c)) + '</option>'; }).join('') + '</select>';
   var first = plans.filter(function (p) { return p.contract; })[0];
   var cols = (rrnCol ? [rrnCol] : []).concat(EDIT_COLS);
   var body = rows.map(function (r, i) {
@@ -1198,26 +1617,48 @@ function rNew() {
     }).join('');
     var memo = p.reasons.concat(p.warns.filter(function (w) { return w.indexOf('본보기:') !== 0; })).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
     return '<tr class="' + (no ? 'no' : on ? 'sel' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '"' + (no ? ' disabled' : '') + ' data-act="npick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
-      '<td class="nw"><b>' + esc(er.v['성명']) + '</b></td><td class="nw">' + esc(er.v['office']) + '</td>' + cells +
+      '<td class="nw"><b>' + esc(er.v['성명']) + '</b>' + (no ? '<div class="why">만들 수 없음: ' + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(er.v['office']) + '</td><td class="nw"><b>' + esc(er.v['구분']) + '</b></td>' + cells +
       '<td class="nw"><b style="color:#3A2470">' + (p.nw ? fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) : '') + '</b></td><td style="font-size:13px;min-width:200px">' + memo + '</td></tr>';
   }).join('');
   var pk = rows.filter(function (r, i) { return S.npicked[r.n] && plans[i].status !== 'no'; }).length;
   var modeBtn = function (m, t) { return '<button class="chip' + (S.np.mode === m ? ' on' : '') + '" data-act="npmode" data-m="' + m + '">' + t + '</button>'; };
-  return '<div class="card"><div class="row" style="gap:10px"><b>본보기 계약서</b>' +
-    '<button class="chip' + (S.tplMode === 'auto' ? ' on' : '') + '" data-act="tplmode" data-m="auto">자동 선택 (센터·구분이 비슷한 최신)</button>' +
+  return '<div class="card"><div class="row" style="gap:10px"><b>샘플 계약서</b>' +
+    '<button class="chip' + (S.tplMode === 'auto' ? ' on' : '') + '" data-act="tplmode" data-m="auto">자동 선택 (근로계약서, 센터·구분이 비슷한 최신)</button>' +
     '<button class="chip' + (S.tplMode === 'fixed' ? ' on' : '') + '" data-act="tplmode" data-m="fixed">직접 고르기</button>' + tplSel + '</div></div>' +
     '<div class="card"><div class="row" style="gap:10px"><b>계약기간</b>' + modeBtn('hire', '입사일부터') + modeBtn('sheet', '시트의 정해진 계약기간') + modeBtn('custom', '직접 입력') +
     (S.np.mode === 'hire' ? '<select class="sel" data-act="npmonths">' + [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(function (m) { return '<option value="' + m + '"' + (+S.np.months === m ? ' selected' : '') + '>' + m + '개월</option>'; }).join('') + '</select>' : '') +
     (S.np.mode === 'custom' ? '<input type="date" class="sel" data-act="npstart" value="' + esc(S.np.start) + '"> ~ <input type="date" class="sel" data-act="npend" value="' + esc(S.np.end) + '">' : '') + '</div></div>' +
-    '<div class="card" style="padding:12px 22px 22px"><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '<th>새 계약기간</th><th>안내</th></tr></thead><tbody>' +
-    (body || '<tr><td colspan="' + (cols.length + 5) + '" class="lbl">D데이가 &quot;신규&quot;인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
-    (first ? '<div class="card" style="background:#FBF1F7"><b>본보기 그대로 유지되는 부분</b><div class="note" style="margin-top:8px;background:#fff">본보기: ' + esc(first.contract.worker.name) + ' (' + esc(first.contract.rel.split('/').slice(-2).join('/')) + ')<br>' + (first.contract.terms || []).map(esc).join('<br>') + '<br><span class="msg">이름·주민번호·주소·계좌·기간·체결일만 바꾸고 나머지는 그대로입니다.</span></div></div>' : '') +
+    '<div class="card" style="padding:12px 22px 22px"><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '<th>새 계약기간</th><th>안내</th></tr></thead><tbody>' +
+    (body || '<tr><td colspan="' + (cols.length + 6) + '" class="lbl">D데이가 &quot;신규&quot;인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
+    (first ? '<div class="card" style="background:#FBF1F7"><b>샘플 그대로 유지되는 부분</b><div class="note" style="margin-top:8px;background:#fff">샘플: ' + esc(first.contract.owner || '') + ' · ' + esc(first.contract.form) + ' (' + esc(first.contract.rel.split('/').slice(-2).join('/')) + ')<br>' + (first.contract.terms || []).map(esc).join('<br>') + '<br><span class="msg">이름·주민번호·주소·계좌·연락처·기간·체결일만 바꾸고 나머지(임금·대금·근무시간 등)는 샘플 그대로입니다.</span></div></div>' : '') +
     '<div class="row" style="justify-content:space-between"><div>선택 <b>' + pk + '명</b>' + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
     '<button class="btn pri" data-act="makeNew"' + (pk ? '' : ' disabled') + '>계약서 만들기 · 확인 화면으로</button></div>';
 }
 
 // ---------- 만들기
+function pad2s(n) { return (n < 10 ? '0' : '') + n; }
+function plain(s) { return String(s || '').replace(/[^가-힣0-9A-Za-z]/g, ''); }
+function makeGeneric(kind, p) {
+  var c = p.contract, an = p.analysis, r = HC.patchGeneric(c.u8, p.sp), ni = HC.readContractInfo(r.bytes), checks = [];
+  var np = ni.paras || [], txt = np.join('\n'), left = HC.genericLeftovers(r.bytes, p.sp), per = HC.genericPeriod(np);
+  checks.push({ ok: !!per && per.start === p.nw[0] && per.end === p.nw[1], t: '계약기간이 ' + fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) + '로 바뀜' });
+  var signOk = an.signIdx.length > 0 && an.signIdx.every(function (i) { var t = HC.dateTokens(np[i] || ''); return t.length === 1 && t[0].y + '-' + pad2s(t[0].m) + '-' + pad2s(t[0].d) === p.sign; });
+  checks.push({ ok: signOk, t: '계약일자(체결일)가 ' + fd(p.sign) + '로 바뀜' });
+  checks.push({ ok: nn(txt).indexOf(nn(p.name)) >= 0, t: '근로자 이름이 ' + p.name + '(으)로 되어 있음' });
+  if (p.sp.old.rrn) checks.push({ ok: HC.digitsOf(txt).indexOf(HC.digitsOf(p.sp.nw.rrn)) >= 0, t: '주민번호가 새 사람 것으로 바뀜' });
+  if (an.addrBlocks.length) checks.push({ ok: plain(txt).indexOf(plain(p.sp.nw.addr)) >= 0, t: '주소가 새 사람 주소로 바뀜' });
+  if (p.sp.old.acct) checks.push({ ok: HC.digitsOf(txt).indexOf(HC.digitsOf(p.sp.nw.acct)) >= 0, t: '계좌번호가 새 사람 것으로 바뀜' });
+  if (p.sp.old.phone) checks.push({ ok: HC.digitsOf(txt).indexOf(HC.digitsOf(p.sp.nw.phone)) >= 0, t: '근로자 연락처가 새 사람 것으로 바뀜' });
+  checks.push({ ok: np.length === (c.paras || []).length, t: '문단 수가 같음' });
+  if (r.log.length) checks.push({ ok: false, t: '일부를 바꾸지 못함: ' + r.log.join(' / ') });
+  checks.push({ ok: !left.length, t: left.length ? '샘플 사람 정보가 남아 있음: ' + left.join(', ') : '샘플(이전) 사람의 정보가 남아 있지 않음' });
+  var base = c.rel.split('/').pop(), parts = c.rel.split('/'), office = parts.length > 1 ? parts[parts.length - 2] : '';
+  var fname = HC.newHireFileName(base, an.owner || '', p.name, p.nw[0]);
+  return { kind: kind, name: p.name, office: p.office, p: p, bytes: r.bytes, fname: fname, zipPath: (kind === 'new' ? '신규입사/' : '갱신계약서/') + (office && kind !== 'new' ? office + '/' : '') + fname,
+    oldParas: c.paras || [], newParas: np, checks: checks, bad: checks.some(function (x) { return !x.ok; }), saved: '' };
+}
 function makeOne(kind, p) {
+  if (p.generic) return makeGeneric(kind, p);
   var c = p.contract, o = { ns: p.nw[0], ne: p.nw[1], sign: p.sign, edits: p.edits };
   var r = HC.patchContract(c.u8, o), why = HC.verifyPatched(c.u8, r.bytes, o, r.applied);
   if (why) throw new Error(why);
@@ -1226,17 +1667,13 @@ function makeOne(kind, p) {
   checks.push({ ok: ni.p1 && ni.p1[0] === p.nw[0] && ni.p1[1] === p.nw[1], t: '제1조 계약기간이 ' + fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) + '로 바뀜' });
   checks.push({ ok: ni.p2 === p.nw[0], t: '제2조 시작일이 새 계약 시작일과 같음' });
   checks.push({ ok: (ni.solo || []).length > 0 && ni.solo.every(function (x) { return x === p.sign; }), t: '체결일·약정서 날짜가 ' + fd(p.sign) + '로 바뀜' });
-  checks.push({ ok: same(ni.terms, c.terms), t: '직책·임금·근로시간 등은 변경 없음' });
-  var nm = kind === 'new' ? p.name : c.worker && c.worker.name;
-  checks.push({ ok: !nm || nn(ni.worker && ni.worker.name) === nn(nm), t: '근로자 이름이 ' + nm + '으로 되어 있음' });
-  var left = [];
-  if (kind === 'new') {
-    var g = function (f) { var e = p.edits.filter(function (x) { return x.field === f; })[0]; return e ? e.new : (f === 'birth' ? c.worker.birth : f === 'addr' ? c.worker.addr : f === 'acct' ? c.worker.acct : ''); };
-    left = HC.findLeftovers(r.bytes, c, { name: p.name, rrn: g('rrn'), birth: g('birth'), addr: g('addr'), acct: g('acct') });
-    checks.push({ ok: !left.length, t: left.length ? '본보기 사람 정보가 남아 있음: ' + left.join(', ') : '본보기(이전) 사람의 정보가 남아 있지 않음' });
-  }
+  checks.push({ ok: same(ni.terms, c.terms), t: '직책·임금·근로시간 등은 샘플과 같음' });
+  checks.push({ ok: nn(ni.worker && ni.worker.name) === nn(p.name), t: '근로자 이름이 ' + p.name + '(으)로 되어 있음' });
+  var g = function (f) { var e = p.edits.filter(function (x) { return x.field === f; })[0]; return e ? e.new : (f === 'birth' ? c.worker.birth : f === 'addr' ? c.worker.addr : f === 'acct' ? c.worker.acct : ''); };
+  var left = HC.findLeftovers(r.bytes, c, { name: p.name, rrn: g('rrn'), birth: g('birth'), addr: g('addr'), acct: g('acct') });
+  checks.push({ ok: !left.length, t: left.length ? '샘플 사람 정보가 남아 있음: ' + left.join(', ') : '샘플(이전) 사람의 정보가 남아 있지 않음' });
   var base = c.rel.split('/').pop(), parts = c.rel.split('/'), office = parts.length > 1 ? parts[parts.length - 2] : '';
-  var fname = kind === 'new' ? HC.newHireFileName(base, c.worker.name, p.name, p.nw[0]) : HC.newFileName(base, p.nw[0]);
+  var fname = HC.newHireFileName(base, c.worker.name, p.name, p.nw[0]);
   return { kind: kind, name: p.name, office: p.office, p: p, bytes: r.bytes, fname: fname, zipPath: (kind === 'new' ? '신규입사/' : '갱신계약서/') + (office && kind !== 'new' ? office + '/' : '') + fname,
     oldParas: c.paras || [], newParas: ni.paras || [], checks: checks, bad: checks.some(function (x) { return !x.ok; }), saved: '' };
 }
@@ -1353,9 +1790,15 @@ document.addEventListener('click', function (e) {
   else if (a === 'npick') { S.npicked[n] = !S.npicked[n]; render(); }
   else if (a === 'dqset') { S.q = +t.dataset.q; render(); }
   else if (a === 'pickall') { renewRows().forEach(function (r) { if (planRenew(r).status !== 'no') S.picked[r.n] = true; }); render(); }
+  else if (a === 'sapply') {
+    if (!S.sampleSel) { alert('샘플 계약서를 먼저 고르세요.'); return; }
+    var cnt = 0; renewRows().forEach(function (r) { if (S.picked[r.n]) { S.sampleFor[r.n] = S.sampleSel; cnt++; } });
+    if (!cnt) alert('샘플을 적용할 사람을 먼저 체크해 주세요.'); render();
+  }
+  else if (a === 'sclear') { renewRows().forEach(function (r) { if (S.picked[r.n]) delete S.sampleFor[r.n]; }); render(); }
   else if (a === 'pickclear') { S.picked = {}; render(); }
   else if (a === 'applybatch') { renewRows().forEach(function (r) { if (S.picked[r.n]) S.months[r.n] = S.batch === 'same' ? 0 : +S.batch; }); render(); }
-  else if (a === 'tplmode') { S.tplMode = t.dataset.m; if (S.tplMode === 'fixed' && !S.tplRel && tplList().length) S.tplRel = tplList()[0].rel; render(); }
+  else if (a === 'tplmode') { S.tplMode = t.dataset.m; if (S.tplMode === 'fixed' && !S.tplRel && sampleList(S.tplQ).length) S.tplRel = sampleList(S.tplQ)[0].rel; render(); }
   else if (a === 'npmode') { S.np.mode = t.dataset.m; render(); }
   else if (a === 'makeRenew') {
     var ps = renewRows().filter(function (r) { return S.picked[r.n]; }).map(planRenew).filter(function (p) { return p.status !== 'no'; });
@@ -1383,7 +1826,9 @@ document.addEventListener('change', function (e) {
   if (a === 'surl') { S.sheetUrl = t.value.trim(); lsSet('sheetUrl', S.sheetUrl); }
   else if (a === 'dirfb') { S.files = Array.prototype.slice.call(t.files); S.dir = null; render(); }
   else if (a === 'dq') { var m = /(\d+)/.exec(t.value); S.q = m ? Math.min(365, +m[1]) : S.q; render(); }
-  else if (a === 'personal') { S.doPersonal = t.checked; render(); }
+  else if (a === 'sq') { S.sampleQ = t.value; render(); }
+  else if (a === 'ssel') { S.sampleSel = t.value; }
+  else if (a === 'tq') { S.tplQ = t.value; render(); }
   else if (a === 'batch') { S.batch = t.value === 'same' ? 'same' : +t.value; render(); }
   else if (a === 'months') { S.months[n] = +t.value; render(); }
   else if (a === 'tpl') { S.tplRel = t.value; render(); }
