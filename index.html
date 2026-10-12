@@ -68,6 +68,8 @@ td input.miss{border-color:#C9355A;background:#FFF5F7}
 @media (max-width:900px){.shell{flex-direction:column}.side{position:static;height:auto;flex:none}.cards4,.cards3{grid-template-columns:repeat(2,minmax(0,1fr))}.main{padding:20px 16px}}
 
 .why{font-size:12px;color:#B3261E;font-weight:400;white-space:normal;max-width:240px;line-height:1.4;margin-top:2px}
+tr.gh td{background:#EADCF8;color:#3A2470;font-weight:700;padding:8px 12px}
+tr.gs td{background:#FBF1F7;color:#7A2A55;font-weight:500;font-size:13px;padding:6px 12px 6px 24px}
 </style>
 </head>
 <body>
@@ -1302,7 +1304,7 @@ var S = {
   screen: 'home', sheet: null, contracts: [], loaded: false, loading: false, loadMsg: '', loadPct: 0, err: '',
   q: 15, batch: 'same', months: {}, picked: {}, doPersonal: true,
   npicked: {}, nedit: {}, np: { mode: 'hire', months: 3, start: '', end: '' }, tplMode: 'auto', tplRel: '',
-  made: [], sel: 0, acks: {}, busy: '', note: '', sheetUrl: '', dir: null, files: null, sampleFor: {}, sampleSel: '', sampleQ: '', tplQ: '', ctx: null
+  made: [], sel: 0, acks: {}, busy: '', note: '', sheetUrl: '', dir: null, files: null, sampleFor: {}, fc: '', fk: '', nfc: '', nfk: '', sampleSel: '', sampleQ: '', tplQ: '', ctx: null
 };
 var rrnCol = '';
 
@@ -1513,6 +1515,33 @@ function planRenew(row) {
   return it;
 }
 function newRows() { return S.sheet.rows.filter(function (r) { return isNew(r.v); }); }
+
+// 센터 > 구분 > D데이 순으로 묶고, 센터·구분 필터를 적용
+function cmpK(a, b) { return String(a).localeCompare(String(b), 'ko'); }
+function sortFilter(rows, fc, fk, dfn) {
+  return rows.filter(function (r) { return (!fc || String(r.v['office'] || '').trim() === fc) && (!fk || String(r.v['구분'] || '').trim() === fk); })
+    .sort(function (a, b) {
+      return cmpK(String(a.v['office'] || '').trim(), String(b.v['office'] || '').trim()) || cmpK(String(a.v['구분'] || '').trim(), String(b.v['구분'] || '').trim()) ||
+        (dfn ? (dfn(a.v) - dfn(b.v)) : 0) || (a.n - b.n);
+    });
+}
+function viewRenew() { return sortFilter(renewRows(), S.fc, S.fk, dDay); }
+function viewNew() { return sortFilter(newRows(), S.nfc, S.nfk, null); }
+function uniq(rows, col) { var o = {}; rows.forEach(function (r) { var x = String(r.v[col] || '').trim(); if (x) o[x] = 1; }); return Object.keys(o).sort(cmpK); }
+function filterBar(rows, fcKey, fkKey, a1, a2) {
+  var mk = function (act, cur, col, label) {
+    var o = '<option value="">' + label + ' 전체</option>' + uniq(rows, col).map(function (x) { return '<option value="' + esc(x) + '"' + (x === cur ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('');
+    return '<select class="sel" data-act="' + act + '" aria-label="' + label + ' 필터">' + o + '</select>';
+  };
+  return '<div class="row" style="gap:8px"><span class="lbl">필터</span>' + mk(a1, S[fcKey], 'office', '센터') + mk(a2, S[fkKey], '구분', '구분') +
+    (S[fcKey] || S[fkKey] ? '<button class="btn ghost" data-act="fclear" data-w="' + a1 + '">필터 해제</button>' : '') + '</div>';
+}
+function grpRow(r, last, rows, cols) {
+  var o = String(r.v['office'] || '').trim() || '(센터 없음)', k = String(r.v['구분'] || '').trim() || '(구분 없음)', h = '';
+  if (o !== last.o) { var c = rows.filter(function (x) { return (String(x.v['office'] || '').trim() || '(센터 없음)') === o; }).length; h += '<tr class="gh"><td colspan="' + cols + '">' + esc(o) + ' · ' + c + '명</td></tr>'; last.o = o; last.k = null; }
+  if (k !== last.k) { var c2 = rows.filter(function (x) { return (String(x.v['office'] || '').trim() || '(센터 없음)') === o && (String(x.v['구분'] || '').trim() || '(구분 없음)') === k; }).length; h += '<tr class="gs"><td colspan="' + cols + '">' + esc(k) + ' · ' + c2 + '명</td></tr>'; last.k = k; }
+  return h;
+}
 var EDIT_COLS = ['입사일', '생년월일', '주소', '은행', '계좌번호'];
 function editedRow(row) {
   var o = S.nedit[row.n] || {}, v = Object.assign({}, row.v);
@@ -1567,19 +1596,22 @@ function rHome() {
 }
 
 function rRenew() {
-  var rows = renewRows(), plans = rows.map(planRenew);
-  var pk = rows.filter(function (r, i) { return S.picked[r.n] && plans[i].status !== 'no'; }).length;
+  var allRows = renewRows(), rows = viewRenew(), plans = rows.map(planRenew), last = { o: null, k: null };
+  var allPlans = allRows.map(planRenew);
+  var pk = allRows.filter(function (r, i) { return S.picked[r.n] && allPlans[i].status !== 'no'; }).length;
+  var pkBad = allRows.filter(function (r, i) { return S.picked[r.n] && allPlans[i].status === 'no'; }).length;
+  var hid = allRows.filter(function (r) { return S.picked[r.n] && rows.indexOf(r) < 0; }).length;
   var monthOpts = function (sel, same) {
     var o = same ? '<option value="same"' + (sel === 'same' ? ' selected' : '') + '>지난 기간과 같게</option>' : '';
     for (var m = 1; m <= 12; m++) o += '<option value="' + m + '"' + (String(sel) === String(m) ? ' selected' : '') + '>' + m + '개월</option>';
     return o;
   };
   var body = rows.map(function (r, i) {
-    var p = plans[i], no = p.status === 'no', on = !!S.picked[r.n] && !no, d = dDay(r.v);
+    var p = plans[i], no = p.status === 'no', on = !!S.picked[r.n], d = dDay(r.v);
     var info = p.edits.length ? p.edits.map(function (e) { return '<span class="tag warn">' + esc(e.label) + '</span>'; }).join(' ') : '<span class="tag ok">날짜만</span>';
-    var memo = p.reasons.concat(p.warns).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
-    return '<tr class="' + (no ? 'no' : on ? 'sel' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '"' + (no ? ' disabled' : '') + ' data-act="pick" data-n="' + r.n + '" aria-label="선택"' + (no ? ' title="' + esc(p.reasons.join(', ')) + '"' : '') + '>' + (on ? '✓' : '') + '</button></td>' +
-      '<td class="nw"><b>' + esc(p.name) + '</b>' + (no ? '<div class="why">만들 수 없음: ' + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(p.office) + '</td><td class="nw"><b>' + esc(p.kind) + '</b></td><td>' + ddTag(d) + '</td>' +
+    var memo = (no ? p.warns : p.reasons.concat(p.warns)).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
+    return grpRow(r, last, rows, 11) + '<tr class="' + (on ? 'sel' : no ? 'no' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '" data-act="pick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
+      '<td class="nw"><b>' + esc(p.name) + '</b>' + (no ? '<div class="why">' + (S.sampleFor[r.n] || p.sample ? '만들 수 없음: ' : '') + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(p.office) + '</td><td class="nw"><b>' + esc(p.kind) + '</b></td><td>' + ddTag(d) + '</td>' +
       '<td class="nw">' + (p.old ? fd(p.old[0]) + ' ~ ' + fd(p.old[1]) : '') + '</td>' +
       '<td style="min-width:120px">' + (no ? '' : '<select data-act="months" data-n="' + r.n + '">' + monthOpts(p.n, false) + '</select>') + '</td>' +
       '<td class="nw"><b style="color:#3A2470">' + (p.nw ? fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) : '') + '</b></td>' +
@@ -1595,32 +1627,34 @@ function rRenew() {
   return sampleCard + '<div class="card row">' +
     '<div class="field" style="width:150px"><label for="dq">D데이 조회 (D-0 ~ D-N)</label><input id="dq" value="D-' + S.q + '" data-act="dq"></div>' +
     '<div class="row" style="gap:8px">' + [7, 15, 30].map(function (n) { return '<button class="chip' + (S.q === n ? ' on' : '') + '" data-act="dqset" data-q="' + n + '">D-' + n + '</button>'; }).join('') + '</div>' +
-    '<div class="grow" style="flex:1"></div>' +
+    '<div class="grow" style="flex:1"></div>' + filterBar(allRows, 'fc', 'fk', 'fc', 'fk') +
     '<div class="row" style="gap:8px"><span class="lbl">일괄 기간</span><select class="sel" data-act="batch">' + monthOpts(S.batch, true) + '</select>' +
     '<button class="btn sec" data-act="applybatch">선택한 사람에게 적용</button></div></div>' +
-    '<div class="card" style="padding:12px 22px 22px"><p class="msg" style="margin:8px 0 12px">D-' + S.q + ' 이내 <b>' + rows.length + '명</b> 중 만들 수 있음 <b>' + plans.filter(function (p) { return p.status !== 'no'; }).length + '명</b>, 만들 수 없음 <b>' + plans.filter(function (p) { return p.status === 'no'; }).length + '명</b> (만들 수 없는 사람은 이름 아래에 이유가 나옵니다)</p><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th><th>D데이</th><th>현재 계약기간</th><th>갱신 기간</th><th>새 계약기간</th><th>계약서(샘플)</th><th>바뀌는 정보</th><th>안내</th></tr></thead><tbody>' +
+    '<div class="card" style="padding:12px 22px 22px"><p class="msg" style="margin:8px 0 12px">D-' + S.q + ' 이내 <b>' + allRows.length + '명</b>' + (rows.length !== allRows.length ? ' 중 필터에 맞는 사람 <b>' + rows.length + '명</b>' : '') + ' · 지금 기준으로 만들 수 있음 <b>' + plans.filter(function (p) { return p.status !== 'no'; }).length + '명</b>, 안 됨 <b>' + plans.filter(function (p) { return p.status === 'no'; }).length + '명</b> (안 되는 사람은 이름 아래 이유가 나옵니다. 체크하고 위에서 샘플을 골라 적용하면 다시 확인합니다)</p><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th><th>D데이</th><th>현재 계약기간</th><th>갱신 기간</th><th>새 계약기간</th><th>계약서(샘플)</th><th>바뀌는 정보</th><th>안내</th></tr></thead><tbody>' +
     (body || '<tr><td colspan="11" class="lbl">D-' + S.q + ' 이내인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
-    '<div class="row" style="justify-content:space-between"><div><button class="btn ghost" data-act="pickall">만들 수 있는 사람 모두 선택</button> <button class="btn ghost" data-act="pickclear">선택 해제</button> &nbsp; 선택 <b>' + pk + '명</b> · 체결일은 새 계약 시작일로 입력됩니다' + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
+    '<div class="row" style="justify-content:space-between"><div><button class="btn ghost" data-act="pickall">만들 수 있는 사람 모두 선택</button> <button class="btn ghost" data-act="pickclear">선택 해제</button> &nbsp; 선택 <b>' + pk + '명</b>' + (pkBad ? ' (만들 수 없는 ' + pkBad + '명은 건너뜀)' : '') + (hid ? ' · 필터로 숨겨진 선택 ' + hid + '명 포함' : '') + ' · 체결일은 새 계약 시작일로 입력됩니다' + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
     '<button class="btn pri" data-act="makeRenew"' + (pk ? '' : ' disabled') + '>계약서 만들기 · 확인 화면으로</button></div>';
 }
 
 function rNew() {
-  var rows = newRows(), plans = rows.map(planNew), lst = sampleList(S.tplQ);
+  var allRows = newRows(), rows = viewNew(), plans = rows.map(planNew), lst = sampleList(S.tplQ), last = { o: null, k: null };
+  var allPlans = allRows.map(planNew);
   var tplSel = '<input class="sel" data-act="tq" value="' + esc(S.tplQ) + '" placeholder="이름·양식·폴더로 찾기" aria-label="샘플 찾기" style="width:190px"' + (S.tplMode === 'fixed' ? '' : ' disabled') + '><select class="sel" data-act="tpl" style="max-width:420px"' + (S.tplMode === 'fixed' ? '' : ' disabled') + ' aria-label="샘플 계약서">' + lst.map(function (c) { return '<option value="' + esc(c.rel) + '"' + (c.rel === S.tplRel ? ' selected' : '') + '>' + esc(sampleLabel(c)) + '</option>'; }).join('') + '</select>';
   var first = plans.filter(function (p) { return p.contract; })[0];
   var cols = (rrnCol ? [rrnCol] : []).concat(EDIT_COLS);
   var body = rows.map(function (r, i) {
-    var p = plans[i], er = editedRow(r), no = p.status === 'no', on = !!S.npicked[r.n] && !no;
+    var p = plans[i], er = editedRow(r), no = p.status === 'no', on = !!S.npicked[r.n];
     var cells = cols.map(function (c) {
       var val = er.v[c] || '';
       return '<td><input class="' + (val ? '' : 'miss') + '" data-act="nedit" data-n="' + r.n + '" data-col="' + esc(c) + '" value="' + esc(val) + '" aria-label="' + esc(c) + '"></td>';
     }).join('');
     var memo = p.reasons.concat(p.warns.filter(function (w) { return w.indexOf('본보기:') !== 0; })).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join('');
-    return '<tr class="' + (no ? 'no' : on ? 'sel' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '"' + (no ? ' disabled' : '') + ' data-act="npick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
+    return grpRow(r, last, rows, cols.length + 6) + '<tr class="' + (on ? 'sel' : no ? 'no' : '') + '"><td><button class="ck' + (on ? ' on' : '') + '" data-act="npick" data-n="' + r.n + '" aria-label="선택">' + (on ? '✓' : '') + '</button></td>' +
       '<td class="nw"><b>' + esc(er.v['성명']) + '</b>' + (no ? '<div class="why">만들 수 없음: ' + esc(p.reasons.join(', ')) + '</div>' : '') + '</td><td class="nw">' + esc(er.v['office']) + '</td><td class="nw"><b>' + esc(er.v['구분']) + '</b></td>' + cells +
       '<td class="nw"><b style="color:#3A2470">' + (p.nw ? fd(p.nw[0]) + ' ~ ' + fd(p.nw[1]) : '') + '</b></td><td style="font-size:13px;min-width:200px">' + memo + '</td></tr>';
   }).join('');
-  var pk = rows.filter(function (r, i) { return S.npicked[r.n] && plans[i].status !== 'no'; }).length;
+  var pk = allRows.filter(function (r, i) { return S.npicked[r.n] && allPlans[i].status !== 'no'; }).length;
+  var pkBad = allRows.filter(function (r, i) { return S.npicked[r.n] && allPlans[i].status === 'no'; }).length;
   var modeBtn = function (m, t) { return '<button class="chip' + (S.np.mode === m ? ' on' : '') + '" data-act="npmode" data-m="' + m + '">' + t + '</button>'; };
   return '<div class="card"><div class="row" style="gap:10px"><b>샘플 계약서</b>' +
     '<button class="chip' + (S.tplMode === 'auto' ? ' on' : '') + '" data-act="tplmode" data-m="auto">자동 선택 (근로계약서, 센터·구분이 비슷한 최신)</button>' +
@@ -1628,10 +1662,10 @@ function rNew() {
     '<div class="card"><div class="row" style="gap:10px"><b>계약기간</b>' + modeBtn('hire', '입사일부터') + modeBtn('sheet', '시트의 정해진 계약기간') + modeBtn('custom', '직접 입력') +
     (S.np.mode === 'hire' ? '<select class="sel" data-act="npmonths">' + [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(function (m) { return '<option value="' + m + '"' + (+S.np.months === m ? ' selected' : '') + '>' + m + '개월</option>'; }).join('') + '</select>' : '') +
     (S.np.mode === 'custom' ? '<input type="date" class="sel" data-act="npstart" value="' + esc(S.np.start) + '"> ~ <input type="date" class="sel" data-act="npend" value="' + esc(S.np.end) + '">' : '') + '</div></div>' +
-    '<div class="card" style="padding:12px 22px 22px"><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '<th>새 계약기간</th><th>안내</th></tr></thead><tbody>' +
+    '<div class="card" style="padding:12px 22px 22px"><div style="margin:6px 0 10px">' + filterBar(allRows, 'nfc', 'nfk', 'nfc', 'nfk') + '</div><div class="tw"><table><thead><tr><th>선택</th><th>이름</th><th>센터</th><th>구분</th>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '<th>새 계약기간</th><th>안내</th></tr></thead><tbody>' +
     (body || '<tr><td colspan="' + (cols.length + 6) + '" class="lbl">D데이가 &quot;신규&quot;인 사람이 없습니다.</td></tr>') + '</tbody></table></div></div>' +
     (first ? '<div class="card" style="background:#FBF1F7"><b>샘플 그대로 유지되는 부분</b><div class="note" style="margin-top:8px;background:#fff">샘플: ' + esc(first.contract.owner || '') + ' · ' + esc(first.contract.form) + ' (' + esc(first.contract.rel.split('/').slice(-2).join('/')) + ')<br>' + (first.contract.terms || []).map(esc).join('<br>') + '<br><span class="msg">이름·주민번호·주소·계좌·연락처·기간·체결일만 바꾸고 나머지(임금·대금·근무시간 등)는 샘플 그대로입니다.</span></div></div>' : '') +
-    '<div class="row" style="justify-content:space-between"><div>선택 <b>' + pk + '명</b>' + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
+    '<div class="row" style="justify-content:space-between"><div>선택 <b>' + pk + '명</b>' + (pkBad ? ' (만들 수 없는 ' + pkBad + '명은 건너뜀)' : '') + (S.busy ? ' · <span class="msg">' + esc(S.busy) + '</span>' : '') + '</div>' +
     '<button class="btn pri" data-act="makeNew"' + (pk ? '' : ' disabled') + '>계약서 만들기 · 확인 화면으로</button></div>';
 }
 
@@ -1789,15 +1823,16 @@ document.addEventListener('click', function (e) {
   else if (a === 'pick') { S.picked[n] = !S.picked[n]; render(); }
   else if (a === 'npick') { S.npicked[n] = !S.npicked[n]; render(); }
   else if (a === 'dqset') { S.q = +t.dataset.q; render(); }
-  else if (a === 'pickall') { renewRows().forEach(function (r) { if (planRenew(r).status !== 'no') S.picked[r.n] = true; }); render(); }
+  else if (a === 'pickall') { viewRenew().forEach(function (r) { if (planRenew(r).status !== 'no') S.picked[r.n] = true; }); render(); }
   else if (a === 'sapply') {
     if (!S.sampleSel) { alert('샘플 계약서를 먼저 고르세요.'); return; }
-    var cnt = 0; renewRows().forEach(function (r) { if (S.picked[r.n]) { S.sampleFor[r.n] = S.sampleSel; cnt++; } });
+    var cnt = 0; viewRenew().forEach(function (r) { if (S.picked[r.n]) { S.sampleFor[r.n] = S.sampleSel; cnt++; } });
     if (!cnt) alert('샘플을 적용할 사람을 먼저 체크해 주세요.'); render();
   }
-  else if (a === 'sclear') { renewRows().forEach(function (r) { if (S.picked[r.n]) delete S.sampleFor[r.n]; }); render(); }
+  else if (a === 'sclear') { viewRenew().forEach(function (r) { if (S.picked[r.n]) delete S.sampleFor[r.n]; }); render(); }
+  else if (a === 'fclear') { if (t.dataset.w === 'nfc') { S.nfc = ''; S.nfk = ''; } else { S.fc = ''; S.fk = ''; } render(); }
   else if (a === 'pickclear') { S.picked = {}; render(); }
-  else if (a === 'applybatch') { renewRows().forEach(function (r) { if (S.picked[r.n]) S.months[r.n] = S.batch === 'same' ? 0 : +S.batch; }); render(); }
+  else if (a === 'applybatch') { viewRenew().forEach(function (r) { if (S.picked[r.n]) S.months[r.n] = S.batch === 'same' ? 0 : +S.batch; }); render(); }
   else if (a === 'tplmode') { S.tplMode = t.dataset.m; if (S.tplMode === 'fixed' && !S.tplRel && sampleList(S.tplQ).length) S.tplRel = sampleList(S.tplQ)[0].rel; render(); }
   else if (a === 'npmode') { S.np.mode = t.dataset.m; render(); }
   else if (a === 'makeRenew') {
@@ -1828,6 +1863,7 @@ document.addEventListener('change', function (e) {
   else if (a === 'dq') { var m = /(\d+)/.exec(t.value); S.q = m ? Math.min(365, +m[1]) : S.q; render(); }
   else if (a === 'sq') { S.sampleQ = t.value; render(); }
   else if (a === 'ssel') { S.sampleSel = t.value; }
+  else if (a === 'fc' || a === 'fk' || a === 'nfc' || a === 'nfk') { S[a] = t.value; render(); }
   else if (a === 'tq') { S.tplQ = t.value; render(); }
   else if (a === 'batch') { S.batch = t.value === 'same' ? 'same' : +t.value; render(); }
   else if (a === 'months') { S.months[n] = +t.value; render(); }
