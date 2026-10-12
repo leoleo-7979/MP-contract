@@ -300,6 +300,23 @@ var HC = (function () {
     }
     return out;
   }
+  var CRC_T = null;
+  function crc32(d) {
+    if (!CRC_T) { CRC_T = []; for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); CRC_T[n] = c >>> 0; } }
+    var crc = 0xFFFFFFFF; for (var i = 0; i < d.length; i++) crc = CRC_T[(crc ^ d[i]) & 255] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+  // 한글이 저장한 압축 스트림 끝에는 CRC32(4바이트)+원본 길이(4바이트)가 붙어 있다. 새로 압축할 때도 똑같이 붙여야 한글이 열 수 있다.
+  function trailerBytes(data) {
+    var c = crc32(data), L = data.length, t = new Uint8Array(8);
+    t[0] = c & 255; t[1] = (c >>> 8) & 255; t[2] = (c >>> 16) & 255; t[3] = (c >>> 24) & 255;
+    t[4] = L & 255; t[5] = (L >>> 8) & 255; t[6] = (L >>> 16) & 255; t[7] = (L >>> 24) & 255;
+    return t;
+  }
+  function addTrailer(res, data, sec) {
+    if (!res || !sec.trailer) return res;
+    var out = new Uint8Array(res.length + 8); out.set(res, 0); out.set(trailerBytes(data), res.length); return out;
+  }
   function loadSection0(u8) {
     var cfb = openCFB(u8);
     var header = cfb.read(['FileHeader']);
@@ -307,7 +324,13 @@ var HC = (function () {
     if (u32(header, 36) & 2) throw new Error('암호가 걸린 파일입니다');
     var raw = cfb.read(['BodyText', 'Section0']);
     var data = compressed ? pako.inflateRaw(raw) : raw;
-    return { cfb: cfb, compressed: compressed, raw: raw, data: data };
+    var trailer = false;
+    if (compressed && raw.length > 8) {
+      var rl = raw.length;
+      trailer = ((raw[rl - 4] | raw[rl - 3] << 8 | raw[rl - 2] << 16 | raw[rl - 1] << 24) >>> 0) === data.length &&
+        ((raw[rl - 8] | raw[rl - 7] << 8 | raw[rl - 6] << 16 | raw[rl - 5] << 24) >>> 0) === crc32(data);
+    }
+    return { cfb: cfb, compressed: compressed, raw: raw, data: data, trailer: trailer };
   }
   function extractParagraphs(data) {
     var out = [];
@@ -628,11 +651,12 @@ var HC = (function () {
       var r2 = applyPersonalEdits(data, o.edits);
       data = r2.data; log = log.concat(r2.log); applied = r2.applied;
       var capy = sec.cfb.capacity(['BodyText', 'Section0']);
-      var nr = capy ? deflateFlexible(data, capy.low, capy.cap) : null;
+      var tr = sec.trailer ? 8 : 0;
+      var nr = capy ? addTrailer(deflateFlexible(data, capy.low - tr, capy.cap - tr), data, sec) : null;
       if (!nr) throw new Error('수정한 내용이 들어갈 공간이 부족합니다(한글에서 직접 수정이 필요)');
       sec.cfb.resizeInSectors(['BodyText', 'Section0'], nr);
     } else if (o.ns) {
-      var newRaw = sec.compressed ? deflateExact(data, sec.raw.length) : data;
+      var newRaw = sec.compressed ? addTrailer(deflateExact(data, sec.raw.length - (sec.trailer ? 8 : 0)), data, sec) : data;
       if (!newRaw) throw new Error('압축 크기를 원본과 같게 맞추지 못했습니다');
       sec.cfb.writeSameSize(['BodyText', 'Section0'], newRaw);
     }
@@ -1193,7 +1217,8 @@ var HC = (function () {
     var bj = buildJobs(ps, sp);
     var r = applyJobsToData(data, bj.jobs, log);
     var capy = sec.cfb.capacity(['BodyText', 'Section0']);
-    var nr = capy ? deflateFlexible(r.data, capy.low, capy.cap) : null;
+    var tr2 = sec.trailer ? 8 : 0;
+    var nr = capy ? addTrailer(deflateFlexible(r.data, capy.low - tr2, capy.cap - tr2), r.data, sec) : null;
     if (!nr) throw new Error('수정한 내용이 들어갈 공간이 부족합니다(한글에서 직접 수정이 필요)');
     sec.cfb.resizeInSectors(['BodyText', 'Section0'], nr);
     var o = sp.old, n = sp.nw, pairs = [];
